@@ -17,13 +17,19 @@ Enable only the extensions needed, or use all six together.
 ## Installation
 
 Pi's Git-package method installs from the repository root, not from individual extension subdirectories.
-**This repository currently lacks the required root `package.json` declaring the six entry points under `pi.extensions`.**
-Once that manifest is added, install the package and select which extensions load:
+The root `package.json` declares all six extension entry points under `pi.extensions`.
+Requires Node.js 22.19 or newer and Git.
+Install the package and select which extensions load:
 
 ```sh
 pi install git:github.com/zaherg/pi-extensions
 pi config
 ```
+
+The package is registered globally in `~/.pi/agent/settings.json`, with all six extensions enabled by default.
+Use `pi config` to disable those not needed.
+No build step or manual `npm install` is required; Pi supplies the declared peer dependencies.
+Remove or disable previous installations of the same extensions before reloading to avoid duplicate commands and tools.
 
 Run `/reload` or restart Pi after changing the selection.
 Restart an existing ACP/RPC session after installing or configuring PhpStorm MCP.
@@ -265,7 +271,7 @@ See [RTK adapter details](rtk-ffgrep/README.md) for recall storage, compatibilit
 
 ## Update or remove
 
-After Git-package installation is available, use Pi to update installed packages:
+Use Pi to update installed packages:
 
 ```sh
 pi update --extensions

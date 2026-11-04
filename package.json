@@ -1,0 +1,24 @@
+{
+  "name": "@zaherg/pi-extensions",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./exit.ts",
+      "./git/index.ts",
+      "./wip.ts",
+      "./phpstorm-mcp/index.ts",
+      "./progress/index.ts",
+      "./rtk-ffgrep/index.ts"
+    ]
+  }
+}
