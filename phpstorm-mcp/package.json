@@ -1,0 +1,21 @@
+{
+    "name": "@zaherg/pi-phpstorm-mcp",
+    "version": "0.1.0",
+    "private": true,
+    "description": "Register PhpStorm MCP only in Pi RPC sessions.",
+    "type": "module",
+    "scripts": {
+        "test": "node --test tests/*.test.ts"
+    },
+    "engines": {
+        "node": ">=22.19.0"
+    },
+    "peerDependencies": {
+        "@earendil-works/pi-coding-agent": ">=1.0.2"
+    },
+    "pi": {
+        "extensions": [
+            "./index.ts"
+        ]
+    }
+}
