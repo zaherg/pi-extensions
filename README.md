@@ -1,7 +1,7 @@
 # Pi Extensions
 
 Six independent extensions for [Pi](https://pi.dev), covering Git commands, task progress, PhpStorm MCP integration for pi acp, search-output filtering, and quitting a session.
-Install only the extensions needed, or register all six together.
+Enable only the extensions needed, or use all six together.
 
 ## Extensions at a glance
 
@@ -16,127 +16,24 @@ Install only the extensions needed, or register all six together.
 
 ## Installation
 
-### Requirements
-
-- Pi installed and available as `pi` on `PATH`.
-  The commands below follow Pi 1.5's package-management interface.
-- Node.js 22.19 or newer.
-- Git for cloning this repository and using `/git` or `/wip`.
-- A macOS or Linux shell for the installation examples.
-  `/git` requires macOS or Linux, an interactive Pi terminal, `/bin/bash`, `/bin/sh`, and `/usr/bin/script`, `/usr/bin/tee`, and `/usr/bin/tail`.
-
-If Pi is not installed, follow its [installation guide](https://pi.dev), or install with npm:
+Pi's Git-package method installs from the repository root, not from individual extension subdirectories.
+**This repository currently lacks the required root `package.json` declaring the six entry points under `pi.extensions`.**
+Once that manifest is added, install the package and select which extensions load:
 
 ```sh
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+pi install git:github.com/zaherg/pi-extensions
+pi config
 ```
 
-No build step or repository-level `npm install` is needed for these extensions.
-Pi supplies the imported Pi packages and TypeBox at runtime.
-PhpStorm MCP, Progress, and RTK have additional setup described in their sections below.
-Linux and Windows runtime compatibility has not been established for the collection as a whole.
-
-Extensions run with the same permissions as Pi.
-Review the source before installing; these are not sandboxed plugins.
-
-### Clone once
-
-Keep the checkout outside Pi's auto-discovered extension directories when using the commands below, to avoid loading the same extension twice.
-
-```sh
-mkdir -p "$HOME/.local/share"
-git clone https://github.com/zaherg/pi-extensions.git "$HOME/.local/share/pi-extensions"
-```
-
-Set this variable in the shell used for the following commands.
-If the repository is already cloned elsewhere, use that checkout's absolute path instead.
-
-```sh
-EXTENSIONS_DIR="$HOME/.local/share/pi-extensions"
-```
-
-There is currently no top-level Pi package manifest or conventional `extensions/` directory.
-A Git-package install of the repository root is therefore not an install-all method.
-Use the explicit entry points below.
-
-### Install extensions individually
-
-Run only the commands for the extensions wanted:
-
-```sh
-# Exit
-pi install "$EXTENSIONS_DIR/exit.ts"
-
-# Git
-pi install "$EXTENSIONS_DIR/git/index.ts"
-
-# WIP
-pi install "$EXTENSIONS_DIR/wip.ts"
-
-# PhpStorm MCP integration for pi acp
-pi install "$EXTENSIONS_DIR/phpstorm-mcp/index.ts"
-
-# Progress
-pi install "$EXTENSIONS_DIR/progress/index.ts"
-
-# RTK for ffgrep
-pi install "$EXTENSIONS_DIR/rtk-ffgrep/index.ts"
-```
-
-Each command records a local-path package in `~/.pi/agent/settings.json`, making it available across projects.
-Pi references the checkout rather than copying it, so keep it in place and retain each extension's sibling files.
-For example, `git/index.ts` needs `git/terminal.ts`; copying only the entry file is insufficient.
-
-### Install all at once
-
-After cloning and setting `EXTENSIONS_DIR`, run:
-
-```sh
-(
-  set -e
-  for entry in \
-    exit.ts \
-    git/index.ts \
-    wip.ts \
-    phpstorm-mcp/index.ts \
-    progress/index.ts \
-    rtk-ffgrep/index.ts
-  do
-    pi install "$EXTENSIONS_DIR/$entry"
-  done
-)
-```
-
-This registers all six entry points and stops if an installation fails.
-It does not install RTK, provide `ffgrep`, configure PhpStorm, or enable task tracking.
-Complete the relevant setup below before using those features.
-
-Run `pi list` to inspect the registered paths, then restart Pi or run `/reload` inside an existing session.
+Run `/reload` or restart Pi after changing the selection.
 Restart an existing ACP/RPC session after installing or configuring PhpStorm MCP.
 
-### Install for one project only
+The syntax `git:github.com/zaherg/pi-extensions/<extension-name>` does not select an extension subdirectory in Pi 1.5.0.
+For example, Pi treats `git:github.com/zaherg/pi-extensions/git` as a complete repository URL and passes it to Git, rather than selecting `git/` within this repository.
 
-Run from the project that should use the extension, adding `--local` to each installation command:
-
-```sh
-cd /path/to/project
-pi install --local "$EXTENSIONS_DIR/progress/index.ts"
-```
-
-This writes `.pi/settings.json` in that project instead of user settings.
-Pi loads project-local packages only after project trust is granted.
-The stored paths still refer to this machine's checkout; they do not make the extension portable to another developer's machine.
-
-### Try without installing
-
-For one Pi invocation, use `-e` instead of `pi install`:
-
-```sh
-pi -e "$EXTENSIONS_DIR/git/index.ts"
-```
-
-Repeat `-e` to try multiple extensions.
-This does not add package entries to settings.
+Installing the package does not install RTK, provide `ffgrep`, configure PhpStorm, or enable task tracking.
+Complete the relevant setup below before using those features.
+Extensions run with the same permissions as Pi; review the source before installing.
 
 ## Exit
 
@@ -301,11 +198,12 @@ Usage is recorded in `progress-usage` session entries; the extension does not ad
 
 ### Use from another harness
 
-The standalone CLI reads one JSON request from stdin and does not require Pi to be running:
+The standalone CLI reads one JSON request from stdin and does not require Pi to be running.
+Replace `/path/to/pi-extensions` with the package's installed directory:
 
 ```sh
 printf '%s\n' '{"action":"read"}' |
-  node "$EXTENSIONS_DIR/progress/cli.ts" --cwd /path/to/project
+  node "/path/to/pi-extensions/progress/cli.ts" --cwd /path/to/project
 ```
 
 Use the CLI or `progress` tool for writes, not direct edits to `progress.json`, so writers share validation and locking.
@@ -367,43 +265,20 @@ See [RTK adapter details](rtk-ffgrep/README.md) for recall storage, compatibilit
 
 ## Update or remove
 
-Because these are local-path installations, update the checkout yourself, then run `/reload` or restart Pi:
+After Git-package installation is available, use Pi to update installed packages:
 
 ```sh
-git -C "$EXTENSIONS_DIR" pull --ff-only
+pi update --extensions
 ```
 
-`pi update --extensions` does not pull this local checkout.
-Review upstream changes before loading them.
-
-Remove one extension using the same entry path used to install it:
+Use `pi config` to disable individual extensions, or remove the entire package:
 
 ```sh
-pi remove "$EXTENSIONS_DIR/git/index.ts"
+pi remove git:github.com/zaherg/pi-extensions
 ```
 
-For project-only installs, run from that project and add `--local`.
-To remove all six global registrations:
-
-```sh
-(
-  set -e
-  for entry in \
-    exit.ts \
-    git/index.ts \
-    wip.ts \
-    phpstorm-mcp/index.ts \
-    progress/index.ts \
-    rtk-ffgrep/index.ts
-  do
-    pi remove "$EXTENSIONS_DIR/$entry"
-  done
-)
-```
-
-Reload or restart afterward.
-Removing registrations does not delete the checkout, saved progress, PhpStorm configuration, or RTK data.
-If an extension remains loaded, check for another installation or a copy in `~/.pi/agent/extensions/` or `.pi/extensions/`.
+Run `/reload` or restart Pi afterward.
+Removing the package does not delete saved progress, PhpStorm configuration, or RTK data.
 
 ## License
 
