@@ -10,7 +10,7 @@ Enable only the extensions needed, or use all six together.
 | [Exit](#exit) | `exit.ts` | `/exit` to request a normal Pi shutdown. |
 | [Git](#git) | `git/index.ts` | `/git` to run Git commands and aliases in an interactive terminal without a model call. |
 | [WIP](#wip) | `wip.ts` | `/wip` to stage changes under the current directory and commit with the message `wip`. |
-| [PhpStorm MCP integration for pi acp](#phpstorm-mcp-integration-for-pi-acp) | `phpstorm-mcp/index.ts` | Connects pi acp to PhpStorm's MCP server through RPC-only registration. |
+| [PhpStorm MCP integration for pi acp](#phpstorm-mcp-integration-for-pi-acp) | `phpstorm-mcp/index.ts` | Connects pi acp to PhpStorm's MCP server in RPC mode only while PhpStorm is running. |
 | [Progress](#progress) | `progress/index.ts` | Opt-in, persistent task tracking with background model updates and a standalone CLI. |
 | [RTK for ffgrep](#rtk-for-ffgrep) | `rtk-ffgrep/index.ts` | Filters large `ffgrep` results through RTK while preserving access to the original output. |
 
@@ -110,10 +110,13 @@ Failures report the operation and exit status rather than forwarding raw hook ou
 Connects pi acp sessions in PhpStorm to the IDE's MCP tools without connecting ordinary Pi terminal sessions to the IDE.
 It is a registration adapter, not an MCP server or an ACP client.
 
-At `session_start`, the extension checks `ctx.mode`.
-Only RPC sessions read the configuration and register the session-scoped server named `phpstorm` through Pi's built-in MCP support.
-TUI, print, and JSON sessions do neither.
-The check applies to every RPC client, not only JetBrains; it does not detect whether PhpStorm is running.
+At `session_start`, the extension checks `ctx.mode` and, for RPC sessions, whether PhpStorm is running locally.
+Only RPC sessions with a running IDE read the configuration and register the session-scoped server named `phpstorm` through Pi's built-in MCP support.
+A closed IDE is silently skipped; failed process queries report an error without registering.
+TUI, print, and JSON sessions do not inspect applications, read configuration, or register the server.
+The check applies to every RPC client, not only JetBrains; other ACP clients can still connect while PhpStorm is open.
+It does not launch PhpStorm, poll for changes, or check MCP health.
+Restart the ACP/RPC session after opening PhpStorm.
 
 ### Setup
 
@@ -142,7 +145,7 @@ An existing configuration replaces those defaults rather than merging with them.
 Unreadable files or malformed JSON cause an error, not a fallback.
 
 Do not also configure `phpstorm` in global or project `mcp.json` if it should remain RPC-only.
-A file-configured server takes precedence and is not controlled by this extension's mode check.
+A file-configured server takes precedence and bypasses this extension's mode and running-application checks.
 See [PhpStorm MCP details](phpstorm-mcp/README.md) for configuration behavior and the separate standalone repository.
 
 ## Progress

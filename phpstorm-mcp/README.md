@@ -1,13 +1,13 @@
 # PhpStorm MCP for Pi RPC sessions
 
-A Pi extension that registers PhpStorm's Model Context Protocol (MCP) server only in RPC sessions, including those launched through `pi-acp` in JetBrains.
+A Pi extension that registers PhpStorm's Model Context Protocol (MCP) server only in RPC sessions while PhpStorm is running locally, including sessions launched through `pi-acp` in JetBrains.
 
 ## Why this extension exists
 
 The goal is to use PhpStorm's MCP tools through the existing JetBrains `pi-acp` registry agent without connecting ordinary Pi terminal sessions to the IDE.
 Adding PhpStorm to Pi's global `~/.pi/agent/mcp.json` would make it available beyond those IDE sessions, including sessions where PhpStorm is not running or needed.
 
-This extension makes registration conditional on Pi's session mode.
+This extension makes registration conditional on Pi's session mode and a running PhpStorm application.
 It keeps the existing ACP agent setup and does not require a custom launcher or another JetBrains agent entry.
 It is not an ACP adapter or an MCP server itself; Pi's built-in MCP support handles the connection and exposes the IDE's tools.
 
@@ -15,15 +15,25 @@ It is not an ACP adapter or an MCP server itself; Pi's built-in MCP support hand
 
 At `session_start`, the extension checks `ctx.mode`:
 
-- In RPC mode, it reads the optional JSON configuration and registers the server as `phpstorm`.
-- In terminal UI, print, and JSON modes, it does not read the configuration or register the server.
+- In RPC mode, it checks whether PhpStorm is running locally before reading the optional JSON configuration and registering the server as `phpstorm`.
+- If PhpStorm is closed, it silently skips configuration loading and registration.
+- In terminal UI, print, and JSON modes, it does not inspect applications, read the configuration, or register the server.
 
 Loading the extension for discovery alone does not register a server.
 Registration lasts for the current session and does not modify Pi's MCP configuration files.
 
 The check applies to all RPC clients, not just JetBrains.
-It does not detect which client launched Pi or whether PhpStorm is running.
-Another RPC client can therefore attempt the same connection and report a failure if the IDE is unavailable.
+It does not detect which client launched Pi, so another ACP/RPC client can still connect while PhpStorm is open.
+It checks at session startup only, without polling or launching PhpStorm.
+After opening PhpStorm, restart the ACP/RPC session to enable the connection.
+Closing PhpStorm after registration does not unregister the server; Pi handles the disconnected connection.
+
+On macOS, detection uses the running GUI application's `com.jetbrains.PhpStorm` bundle identifier, excluding background stdio bridges.
+On Linux, it checks native `phpstorm`/`phpstorm64` processes or a Java process with `-Didea.platform.prefix=PhpStorm`.
+On Windows, it checks `phpstorm.exe`/`phpstorm64.exe` through PowerShell's process query.
+Linux and Windows checks exclude processes whose arguments contain `stdioMcpServer`.
+Process queries have a two-second timeout and a 1 MiB output limit; query failures and unsupported platforms report an error without registering the server.
+This is an application-presence check, not an MCP health check: disabled MCP support, incorrect connection settings, or the IDE exiting after the check can still cause connection failures.
 
 ## Requirements
 
@@ -58,7 +68,7 @@ Use `pi remove "$PWD"` from the same directory to remove a local installation.
 
 ## Server configuration
 
-The extension reads `~/.pi/agent/pi-phpstorm-mcp.json` at the start of each RPC session and registers it as `phpstorm`.
+The extension reads `~/.pi/agent/pi-phpstorm-mcp.json` at the start of each RPC session when PhpStorm is running and registers it as `phpstorm`.
 The file contains one MCP server configuration object, without an `mcpServers` wrapper.
 If the file does not exist, the extension uses these defaults:
 
@@ -83,7 +93,7 @@ Unreadable files and malformed JSON report an error with the file path; they do 
 Pi validates the server configuration and rejects invalid settings.
 
 Do not also add `phpstorm` to `~/.pi/agent/mcp.json` or the project's `.pi/mcp.json` if it should remain RPC-only.
-A file-configured server named `phpstorm` takes precedence over the extension's registration and is not controlled by its mode check.
+A file-configured server named `phpstorm` takes precedence over the extension's registration and bypasses both the mode and running-application checks.
 The extension does not disable or remove independently configured servers.
 
 ## Verification
@@ -95,5 +105,7 @@ npm test
 ```
 
 Tests cover JSON configuration, missing-file defaults, configuration changes between sessions, and file errors.
-They also exercise the extension's registration boundary for RPC, TUI, print, and JSON sessions, and verify that discovery alone does not register a server.
-They do not launch PhpStorm or verify a live IDE connection.
+They also exercise the extension's registration boundary for RPC, TUI, print, and JSON sessions, and verify that discovery alone does not inspect applications or register a server.
+Detection tests cover running and closed applications, leftover bridges, unrelated process mentions, repeated session checks, and failed or incomplete process queries.
+The tests use simulated process-query results and a simulated macOS application registry; they do not launch PhpStorm or verify a live IDE connection.
+Native Linux and Windows detection has not been runtime-tested.

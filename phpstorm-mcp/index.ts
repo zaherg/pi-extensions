@@ -2,10 +2,12 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { isPhpStormRunning } from "./running.ts";
 
 export default function phpstormMcp(pi: ExtensionAPI) {
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.mode !== "rpc") return;
+		if (!(await isPhpStormRunning(pi))) return;
 
 		const configPath = join(homedir(), ".pi", "agent", "pi-phpstorm-mcp.json");
 		let config = {

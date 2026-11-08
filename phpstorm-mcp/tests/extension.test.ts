@@ -30,12 +30,17 @@ beforeEach((t) => {
 	});
 });
 
-function loadExtension() {
+const runningOutput = process.platform === "linux" ? "phpstorm /opt/phpstorm/bin/phpstorm\n" : "true\n";
+const stoppedOutput = process.platform === "linux" ? "node node pi-acp\n" : "false\n";
+const success = (stdout: string) => ({ stdout, stderr: "", code: 0, killed: false, truncated: false });
+
+function loadExtension(exec: ExtensionAPI["exec"] = async () => success(runningOutput)) {
 	const handlers = new Map<string, SessionStartHandler[]>();
 	const registrations: { name: string; config: McpServerConfig }[] = [];
+	const checks: Parameters<ExtensionAPI["exec"]>[] = [];
 
 	// Only the Pi API members used by this extension are needed in the fixture.
-	const pi: Pick<ExtensionAPI, "on" | "registerMcpServer"> = {
+	const pi: Pick<ExtensionAPI, "on" | "registerMcpServer" | "exec"> = {
 		on(event, handler) {
 			assert.equal(event, "session_start");
 			const callbacks = handlers.get(event) ?? [];
@@ -48,11 +53,16 @@ function loadExtension() {
 		registerMcpServer(name, config) {
 			registrations.push({ name, config });
 		},
+		async exec(...args) {
+			checks.push(args);
+			return exec(...args);
+		},
 	};
 	phpstormMcp(pi as ExtensionAPI);
 
 	return {
 		registrations,
+		checks,
 		async startSession(mode: ExtensionContext["mode"]) {
 			for (const handler of handlers.get("session_start") ?? []) {
 				await handler({ type: "session_start", reason: "startup" }, { mode } as ExtensionContext);
@@ -136,10 +146,40 @@ for (const mode of ["tui", "print", "json"] as const) {
 		await extension.startSession(mode);
 
 		assert.deepEqual(extension.registrations, []);
+		assert.deepEqual(extension.checks, []);
 	});
 }
 
-test("does not read config or register a server during extension discovery", () => {
+test("does not inspect processes, read config, or register during extension discovery", () => {
 	writeFileSync(configPath, "{ invalid json");
-	assert.deepEqual(loadExtension().registrations, []);
+	const extension = loadExtension();
+	assert.deepEqual(extension.registrations, []);
+	assert.deepEqual(extension.checks, []);
+});
+
+test("skips configuration and registration when PhpStorm is closed", async () => {
+	writeFileSync(configPath, "{ invalid json");
+	const extension = loadExtension(async () => success(stoppedOutput));
+	await extension.startSession("rpc");
+	assert.equal(extension.checks.length, 1);
+	assert.deepEqual(extension.registrations, []);
+});
+
+test("checks again on the next session after PhpStorm opens", async () => {
+	let running = false;
+	const extension = loadExtension(async () => success(running ? runningOutput : stoppedOutput));
+	await extension.startSession("rpc");
+	assert.deepEqual(extension.registrations, []);
+	running = true;
+	await extension.startSession("rpc");
+	assert.equal(extension.checks.length, 2);
+	assert.equal(extension.registrations.length, 1);
+});
+
+test("refuses registration when the running-application query fails", async () => {
+	const extension = loadExtension(async () => ({ ...success(""), code: 1, stderr: "private process details" }));
+	await assert.rejects(extension.startSession("rpc"), {
+		message: "Failed to check whether PhpStorm is running: process query failed; MCP was not registered.",
+	});
+	assert.deepEqual(extension.registrations, []);
 });
