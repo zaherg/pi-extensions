@@ -1,9 +1,10 @@
 import { type SpawnSyncReturns, spawnSync } from "node:child_process";
 import { setImmediate } from "node:timers/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import {
 	CAPTURE_BYTES,
-	gitFailureMessage,
+	gitResultMessage,
 	terminalCaptureArgs,
 } from "./terminal.ts";
 
@@ -18,9 +19,16 @@ export function gitShellCommand(args: string): string {
 export default function (pi: ExtensionAPI) {
 	let running = false;
 
+	// Custom entries render in the transcript without becoming model context.
+	pi.registerEntryRenderer<string>("git-output", (entry, _options, theme) => {
+		const message =
+			typeof entry.data === "string" ? entry.data : "Invalid saved Git output.";
+		return new Text(`${theme.fg("accent", "/git")}\n${message}`, 1, 0);
+	});
+
 	pi.registerCommand("git", {
 		description:
-			'Run any Git command in the shell; commit "message" means commit -m "message"',
+			'Run any Git command with inline results; commit "message" means commit -m "message"',
 		handler: async (args, ctx) => {
 			if (ctx.mode !== "tui") {
 				throw new Error("/git requires Pi's interactive terminal.");
@@ -34,83 +42,46 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			running = true;
-			// Ctrl+C must not terminate Pi during terminal handoff or the return prompt.
+			// Ctrl+C must not terminate Pi during terminal handoff.
 			const ignoreSigint = () => {};
 			process.on("SIGINT", ignoreSigint);
+			let message: string;
 			try {
-				const outcome = await ctx.ui.custom<{
-					result: SpawnSyncReturns<Buffer>;
-					pauseFailed: boolean;
-				}>((tui, _theme, _keybindings, done) => {
-					let result: SpawnSyncReturns<Buffer>;
-					let pauseFailed = false;
-					tui.stop();
-					try {
-						// This is explicitly user-authored shell source, not interpolated file data.
-						// Keep cwd outside the shell source, including paths containing metacharacters.
-						result = spawnSync(
-							"/bin/bash",
-							terminalCaptureArgs(
-								process.env.SHELL || "/bin/sh",
-								gitShellCommand(args),
-							),
-							{
-								cwd: ctx.cwd,
-								stdio: ["inherit", "pipe", "inherit"],
-								maxBuffer: CAPTURE_BYTES + 1024,
-							},
-						);
-						if (!result.error && !result.signal && result.status === 0) {
-							// Success output remains in the terminal. Failures are replayed in Pi,
-							// so they return immediately without an extra Enter prompt.
-							const pause = spawnSync(
-								"/bin/sh",
-								[
-									"-c",
-									"printf '\nPress Enter to return to Pi... '; IFS= read -r reply",
-								],
-								{ cwd: ctx.cwd, stdio: "inherit" },
+				const result = await ctx.ui.custom<SpawnSyncReturns<Buffer>>(
+					(tui, _theme, _keybindings, done) => {
+						let result: SpawnSyncReturns<Buffer>;
+						tui.stop();
+						try {
+							// This is explicitly user-authored shell source, not interpolated file data.
+							// Keep cwd outside the shell source, including paths containing metacharacters.
+							result = spawnSync(
+								"/bin/bash",
+								terminalCaptureArgs(
+									process.env.SHELL || "/bin/sh",
+									gitShellCommand(args),
+								),
+								{
+									cwd: ctx.cwd,
+									stdio: ["inherit", "pipe", "inherit"],
+									maxBuffer: CAPTURE_BYTES + 1024,
+								},
 							);
-							pauseFailed = Boolean(pause.error);
+						} finally {
+							tui.start();
+							tui.requestRender(true);
 						}
-					} finally {
-						tui.start();
-						tui.requestRender(true);
-					}
-					done({ result, pauseFailed });
-					return { render: () => [], invalidate() {} };
-				});
+						done(result);
+						return { render: () => [], invalidate() {} };
+					},
+				);
 
-				const { result, pauseFailed } = outcome;
-				if (result.error) {
-					ctx.ui.notify(
-						"Git shell could not be started. Check SHELL and the project directory.",
-						"error",
-					);
-				} else if (result.signal) {
-					ctx.ui.notify(
-						`Git shell stopped by ${result.signal}. Check git status before retrying.`,
-						"warning",
-					);
-				} else if (result.status !== 0) {
-					ctx.ui.notify(
-						gitFailureMessage(result.stdout, result.status),
-						"info",
-					);
-				} else {
-					ctx.ui.notify("Git shell completed.", "info");
-				}
-				if (pauseFailed)
-					ctx.ui.notify(
-						"The return-to-Pi prompt could not be started.",
-						"warning",
-					);
+				message = result.error
+					? "Git shell could not be started. Check SHELL and the project directory."
+					: gitResultMessage(result.stdout, result.status, result.signal);
 			} catch {
 				// Shell errors can contain credentials; never copy them into Pi's transcript.
-				ctx.ui.notify(
-					"Git terminal execution failed. Check git status before retrying.",
-					"error",
-				);
+				message =
+					"Git terminal execution failed. Check git status before retrying.";
 			} finally {
 				// spawnSync defers signals. Two check phases allow an intervening poll
 				// before restoring the default handler, even when invoked from I/O.
@@ -118,6 +89,16 @@ export default function (pi: ExtensionAPI) {
 				await setImmediate();
 				process.removeListener("SIGINT", ignoreSigint);
 				running = false;
+			}
+
+			try {
+				pi.appendEntry("git-output", message);
+			} catch {
+				// A persistence error must not misreport execution or cause a retry.
+				ctx.ui.notify(
+					`Could not save Git's inline result.\n${message}`,
+					"warning",
+				);
 			}
 		},
 	});

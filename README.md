@@ -8,7 +8,7 @@ Enable only the extensions needed, or use all six together.
 | Extension | Entry point | What it adds |
 | --- | --- | --- |
 | [Exit](#exit) | `exit.ts` | `/exit` to request a normal Pi shutdown. |
-| [Git](#git) | `git/index.ts` | `/git` to run Git commands and aliases in an interactive terminal without a model call. |
+| [Git](#git) | `git/index.ts` | `/git` to run Git commands and aliases with inline results, terminal access, and no model call. |
 | [WIP](#wip) | `wip.ts` | `/wip` to stage changes under the current directory and commit with the message `wip`. |
 | [PhpStorm MCP integration for pi acp](#phpstorm-mcp-integration-for-pi-acp) | `phpstorm-mcp/index.ts` | Connects pi acp to PhpStorm's MCP server in RPC mode only while PhpStorm is running. |
 | [Progress](#progress) | `progress/index.ts` | Opt-in, persistent task tracking with background model updates and a standalone CLI. |
@@ -73,11 +73,12 @@ All installed Git subcommands and Git aliases are passed through, not restricted
 The arguments are shell code: expansions, pipes, redirects, and chained commands are allowed.
 Run only trusted input; destructive commands and Git hooks execute without an additional confirmation.
 
-- Successful commands wait for Enter before returning to Pi.
-- Failed commands return automatically and display a bounded, sanitized tail of Git's diagnostic output.
+- Commands return automatically without an Enter prompt and display a bounded, sanitized output tail inline.
+- Failed commands include Git's diagnostic text and exit status.
 - Ctrl+C interrupts the foreground command without closing Pi.
   It does not undo changes already made.
-- No model call is made, and captured output is not inserted into model context or saved session messages.
+- Sanitized results are saved as display-only session entries, not model context.
+  No model call is made.
   Terminal scrollback and Pi input history can still retain input or output.
 
 See [Git details](git/README.md) for shell behavior, output limits, and redaction caveats.

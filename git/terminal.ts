@@ -38,9 +38,10 @@ ${invocation} 2>&1 | /usr/bin/tee /dev/tty | /usr/bin/tail -c "$3"`,
 	];
 }
 
-export function gitFailureMessage(
+export function gitResultMessage(
 	output: Buffer | null | undefined,
 	status: number | null,
+	signal: NodeJS.Signals | null = null,
 ): string {
 	let text = output?.toString("utf8") ?? "";
 	const captureTruncated = (output?.length ?? 0) >= CAPTURE_BYTES;
@@ -56,7 +57,7 @@ export function gitFailureMessage(
 		);
 
 	// Defense in depth for common credentials, not an arbitrary-secret detector.
-	// This text stays in Pi's transient UI, never in a model message or session entry.
+	// Only sanitized text is stored in the display-only session entry.
 	text = text
 		.replace(
 			/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
@@ -80,7 +81,8 @@ export function gitFailureMessage(
 			"[REDACTED]",
 		)
 		.replace(/(https?:\/\/)[^\s/@]+@/gi, "$1[REDACTED]@")
-		.trim();
+		.replace(/^\n+/, "")
+		.trimEnd();
 
 	const lines = text.split("\n");
 	const truncated =
@@ -88,8 +90,14 @@ export function gitFailureMessage(
 		lines.length > DISPLAY_LINES ||
 		text.length > DISPLAY_CHARACTERS;
 	text = lines.slice(-DISPLAY_LINES).join("\n").slice(-DISPLAY_CHARACTERS);
-	const heading = `Git command failed (exit ${status ?? "unknown"}).`;
-	if (!text)
-		return `${heading}\nNo diagnostic text was captured; check the terminal output.`;
-	return `${heading}\n${truncated ? "[Last output only]\n" : ""}${text}`;
+	const heading = signal
+		? `Git shell stopped by ${signal}. Check git status before retrying.`
+		: status === 0
+			? "Git shell completed."
+			: `Git command failed (exit ${status ?? "unknown"}).`;
+	const empty =
+		status === 0 && !signal
+			? "(No output)"
+			: "No diagnostic text was captured; check the terminal output.";
+	return `${heading}\n${truncated ? "[Last output only]\n" : ""}${text || empty}`;
 }
