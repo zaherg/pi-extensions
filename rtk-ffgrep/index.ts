@@ -1,5 +1,5 @@
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -20,7 +20,7 @@ const FAILURE_MESSAGES: Record<Failure, string> = {
 };
 
 export default function rtkFfgrep(pi: ExtensionAPI) {
-	const configDirectory = join(homedir(), ".config", "rtk");
+	const configDirectory = join(dirname(fileURLToPath(import.meta.url)), "rtk");
 	const lifetime = new AbortController();
 	const pending = new Set<Promise<Result>>();
 	const reported = new Set<Failure>();

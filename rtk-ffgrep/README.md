@@ -5,9 +5,9 @@ It leaves the stock `extensions/rtk.ts` bash hook unchanged.
 
 ## Configuration
 
-The pipeline is stored at `~/.config/rtk/pipeline.toml`.
+The pipeline is stored at `rtk/pipeline.toml`, inside this extension's own directory.
 The adapter sets `RTK_CONFIG_DIR` to that directory for its child processes, without changing the session environment or requiring a symlink.
-RTK also loads `~/.config/rtk/pipelines/*.toml` and trusted project `.rtk` pipelines according to its normal precedence.
+RTK also loads `rtk/pipelines/*.toml` beside it and trusted project `.rtk` pipelines according to its normal precedence.
 The override affects pipeline loading only.
 On macOS, native `config.toml`, tracking, and recall remain under `~/Library/Application Support/rtk/`.
 
@@ -36,8 +36,9 @@ The `matches` method is not appropriate for FFF's grouped headings and numbered 
 Validate or inspect the pipeline explicitly:
 
 ```bash
-RTK_CONFIG_DIR="$HOME/.config/rtk" rtk pipeline validate
-RTK_CONFIG_DIR="$HOME/.config/rtk" rtk pipeline explain --agent pi --tool ffgrep
+# Run from the extension directory (rtk-ffgrep/).
+RTK_CONFIG_DIR="$PWD/rtk" rtk pipeline validate
+RTK_CONFIG_DIR="$PWD/rtk" rtk pipeline explain --agent pi --tool ffgrep
 ```
 
 Set `enabled = false` on the `ffgrep-output` rule to disable it.

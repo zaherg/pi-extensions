@@ -230,8 +230,10 @@ The adapter was verified against RTK 1.1.0 and Pi 1.5.0; other RTK protocol vers
 
 ### Pipeline setup
 
-Create `~/.config/rtk/pipeline.toml` with the following configuration.
-If it already exists, merge the rule into the existing configuration rather than overwriting unrelated rules.
+The pipeline ships with the extension at `rtk-ffgrep/rtk/pipeline.toml`; no user-level configuration is required.
+The adapter points `RTK_CONFIG_DIR` at that directory for its child processes.
+To customize it, edit that file with the following baseline configuration.
+If `rtk/pipelines/*.toml` or trusted project `.rtk` pipelines exist, RTK merges them according to its normal precedence.
 
 ```toml
 schema_version = 1
@@ -248,8 +250,9 @@ use = ["ansi", "cap"]
 Validate the pipeline:
 
 ```sh
-RTK_CONFIG_DIR="$HOME/.config/rtk" rtk pipeline validate
-RTK_CONFIG_DIR="$HOME/.config/rtk" rtk pipeline explain --agent pi --tool ffgrep
+# Run from the extension directory (rtk-ffgrep/).
+RTK_CONFIG_DIR="$PWD/rtk" rtk pipeline validate
+RTK_CONFIG_DIR="$PWD/rtk" rtk pipeline explain --agent pi --tool ffgrep
 ```
 
 RTK 1.1 classifies unknown tools as `any`, so do not add `when = { tool = "ffgrep" }` to this rule.

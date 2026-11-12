@@ -1,0 +1,16 @@
+schema_version = 1
+
+[pipeline]
+name = "pi-ffgrep"
+extends = "rtk:default"
+
+# The Pi rtk-ffgrep adapter submits only ffgrep results to this pipeline.
+# RTK 1.1 exposes unknown tools as tool="any", not their original names.
+# Do not add when.tool="ffgrep": that condition never matches in RTK 1.1.
+[[hook.after_tool.any]]
+name = "ffgrep-output"
+use = ["ansi", "cap"]
+
+# FFF already groups matches by file; the matches/grep-group method expects
+# path:line:content instead. The adapter preserves headings and notices and
+# verifies native RTK recall before accepting a smaller replacement.
