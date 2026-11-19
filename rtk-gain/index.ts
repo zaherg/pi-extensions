@@ -22,6 +22,7 @@ function summary(value: unknown) {
 }
 
 function sandboxes(value: unknown) {
+	if (value === null) return new Map<string, string>();
 	if (!Array.isArray(value)) return;
 	const names = new Map<string, string>();
 	for (const box of value) {
@@ -32,20 +33,56 @@ function sandboxes(value: unknown) {
 	return names;
 }
 
+function plural(count: number, word: string) {
+	return `${word}${count === 1 ? "" : "s"}`;
+}
+
 function savings(gain: Gain, format = exact) {
 	const percent = gain.total_input ? (gain.total_saved / gain.total_input) * 100 : 0;
-	return `${format.format(gain.total_saved)} tokens saved (${percent.toFixed(1)}%)`;
+	return `${format.format(gain.total_saved)} ${plural(gain.total_saved, "token")} saved (${percent.toFixed(1)}%)`;
 }
 
 function detail(name: string, gain: Gain) {
-	return `${name}: ${savings(gain)}\n  ${exact.format(gain.total_commands)} commands | ${exact.format(gain.total_input)} tokens before / ${exact.format(gain.total_output)} after`;
+	return `${name}: ${savings(gain)}\n  ${exact.format(gain.total_commands)} ${plural(gain.total_commands, "command")} | ${exact.format(gain.total_input)} tokens before / ${exact.format(gain.total_output)} after`;
+}
+
+function guestExit(code: number) {
+	if (code === 127) return "rtk not found in sandbox";
+	if (code === 125) return "sbx could not run rtk";
+	return `rtk exited with code ${code}`;
+}
+
+function formatAll(rows: [string, Gain | string][], noSandboxes: boolean): [string, "info" | "warning" | "error"] {
+	const total: Gain = { total_commands: 0, total_input: 0, total_output: 0, total_saved: 0 };
+	const lines: string[] = [];
+	let reported = 0;
+	for (const [name, gain] of rows) {
+		if (typeof gain === "string") lines.push(`${name}: excluded (${gain})`);
+		else {
+			reported++;
+			for (const key of counters) total[key] += gain[key];
+			lines.push(detail(name, gain));
+		}
+	}
+	if (noSandboxes) lines.push("Sandboxes: none");
+	if (!reported) return [["No RTK gains available.", ...lines].join("\n"), "error"];
+	if (noSandboxes) return [lines.join("\n"), "info"];
+	if (!validGain(total)) return [["Total unavailable: counters exceed safe integer range.", ...lines].join("\n"), "warning"];
+	const complete = reported === rows.length;
+	return [[detail(complete ? "Total" : "Total (reported only)", total), ...lines].join("\n"), complete ? "info" : "warning"];
 }
 
 export default function rtkGain(pi: ExtensionAPI) {
 	const lifetime = new AbortController();
 	const { signal } = lifetime;
 
-	async function query<T>(cwd: string, command: string, args: string[], parse: (json: unknown) => T | undefined): Promise<T | string> {
+	async function query<T>(
+		cwd: string,
+		command: string,
+		args: string[],
+		parse: (json: unknown) => T | undefined,
+		onExit?: (code: number) => string,
+	): Promise<T | string> {
 		let result: ExecResult;
 		try {
 			result = await pi.exec(command, args, { cwd, signal, timeout: 5_000, maxBuffer: 1024 * 1024 });
@@ -54,7 +91,10 @@ export default function rtkGain(pi: ExtensionAPI) {
 		}
 		if (result.truncated) return `${command} output exceeded 1 MiB`;
 		if (result.killed) return `${command} was interrupted or timed out`;
-		if (result.code !== 0) return `${command} exited with code ${result.code}`;
+		if (result.code !== 0) {
+			if (!result.stdout && /^spawn\b.*\bENOENT\b/.test(result.stderr)) return `${command} not found`;
+			return onExit ? onExit(result.code) : `${command} exited with code ${result.code}`;
+		}
 		let json: unknown;
 		try {
 			json = JSON.parse(result.stdout);
@@ -65,23 +105,48 @@ export default function rtkGain(pi: ExtensionAPI) {
 	}
 
 	let pending: Promise<Gain | string> | undefined;
-	function local(ctx: ExtensionContext) {
-		pending ??= query(ctx.cwd, "rtk", gainArgs, summary).then((gain) => {
-			if (ctx.hasUI && !signal.aborted) {
-				ctx.ui.setStatus("rtk-gain", typeof gain === "string" ? undefined : `RTK: ${savings(gain, compact)}`);
+	let queued: ExtensionContext | undefined;
+
+	function readLocal(ctx: ExtensionContext): Promise<Gain | string> {
+		const { cwd } = ctx;
+		const next = query(cwd, "rtk", gainArgs, summary).then((gain) => {
+			try {
+				if (!signal.aborted && ctx.hasUI) {
+					ctx.ui.setStatus("rtk-gain", typeof gain === "string" ? undefined : `RTK: ${savings(gain, compact)}`);
+				}
+			} finally {
+				pending = undefined;
+				const follow = queued;
+				queued = undefined;
+				if (follow && !signal.aborted) void readLocal(follow);
 			}
 			return gain;
-		}).finally(() => { pending = undefined; });
-		return pending;
+		});
+		pending = next;
+		return next;
 	}
 
-	function refresh(_event: unknown, ctx: ExtensionContext) {
-		if (ctx.hasUI) void local(ctx);
+	function refresh(ctx: ExtensionContext) {
+		if (signal.aborted || !ctx.hasUI) return;
+		if (pending) queued = ctx;
+		else void readLocal(ctx);
 	}
-	pi.on("session_start", refresh);
-	pi.on("agent_settled", refresh);
+
+	async function freshLocal(ctx: ExtensionContext): Promise<Gain | string> {
+		// Wait for any in-flight background read so commands never return a pre-command snapshot.
+		queued = undefined;
+		while (pending) await pending;
+		return signal.aborted ? "rtk was interrupted or timed out" : readLocal(ctx);
+	}
+
+	pi.on("session_start", (_event, ctx) => refresh(ctx));
+	pi.on("turn_end", (event, ctx) => {
+		if (event.toolResults.length > 0) refresh(ctx);
+	});
+	pi.on("agent_settled", (_event, ctx) => refresh(ctx));
 	pi.on("session_shutdown", async (_event, ctx) => {
 		lifetime.abort();
+		queued = undefined;
 		if (ctx.hasUI) ctx.ui.setStatus("rtk-gain", undefined);
 		await pending;
 	});
@@ -89,6 +154,7 @@ export default function rtkGain(pi: ExtensionAPI) {
 	pi.registerCommand("rtk-gain", {
 		description: "Show RTK token savings here, or across the host and running Docker sandboxes: /rtk-gain [all]",
 		handler: async (args, ctx) => {
+			const { cwd } = ctx;
 			const show = (text: string, level: "info" | "warning" | "error") => {
 				if (signal.aborted) return;
 				if (ctx.hasUI) ctx.ui.notify(text, level);
@@ -96,7 +162,7 @@ export default function rtkGain(pi: ExtensionAPI) {
 			};
 			const scope = args.trim();
 			if (scope && scope !== "all") return show("Usage: /rtk-gain [all]", "error");
-			const here = await local(ctx);
+			const here = await freshLocal(ctx);
 			if (!scope) {
 				return typeof here === "string"
 					? show(`Local RTK gain unavailable: ${here}. Check rtk gain --format json.`, "error")
@@ -104,36 +170,21 @@ export default function rtkGain(pi: ExtensionAPI) {
 			}
 			if (signal.aborted) return;
 			const rows: [string, Gain | string][] = [["Local", here]];
-			const boxes = await query(ctx.cwd, "sbx", ["--no-input", "ls", "--json"], sandboxes);
+			const boxes = await query(cwd, "sbx", ["--no-input", "ls", "--json"], sandboxes);
+			if (signal.aborted) return;
 			if (typeof boxes === "string") {
 				rows.push(["Sandboxes", `${boxes}; check sbx ls --json on the host`]);
-			} else {
-				for (const [name, status] of boxes) {
-					if (signal.aborted) return;
+			} else if (boxes.size > 0) {
+				rows.push(...await Promise.all([...boxes].map(async ([name, status]): Promise<[string, Gain | string]> => {
 					const label = `Sandbox ${name}`;
-					if (status !== "running") {
-						rows.push([label, status === "stopped" ? "stopped" : "not running"]);
-						continue;
-					}
+					if (status !== "running") return [label, status === "stopped" ? "stopped" : "not running"];
 					// shortcut: sbx exec can start a guest stopped since listing, use a no-start exec flag if sbx adds one.
-					rows.push([label, await query(ctx.cwd, "sbx", ["--no-input", "exec", "--", name, "rtk", ...gainArgs], summary)]);
-				}
+					return [label, await query(cwd, "sbx", ["--no-input", "exec", "--", name, "rtk", ...gainArgs], summary, guestExit)];
+				})));
 			}
 
-			const total: Gain = { total_commands: 0, total_input: 0, total_output: 0, total_saved: 0 };
-			const lines: string[] = [];
-			let reported = 0;
-			for (const [name, gain] of rows) {
-				if (typeof gain === "string") lines.push(`${name}: excluded (${gain})`);
-				else {
-					reported++;
-					for (const key of counters) total[key] += gain[key];
-					lines.push(detail(name, gain));
-				}
-			}
-			if (!reported) return show(["No RTK gains available.", ...lines].join("\n"), "error");
-			if (!validGain(total)) return show(["Total unavailable: counters exceed safe integer range.", ...lines].join("\n"), "warning");
-			show([detail("Total (reported only)", total), ...lines].join("\n"), reported === rows.length ? "info" : "warning");
+			const [text, level] = formatAll(rows, boxes instanceof Map && boxes.size === 0);
+			show(text, level);
 		},
 	});
 }

@@ -256,7 +256,7 @@ See [RTK for other Pi tools](rtk-pi-extended/README.md) for the coverage table, 
 ## RTK gain
 
 Pi's footer shows the estimated tokens RTK saved in the current environment, for example `RTK: 12.4K tokens saved (37.5%)`.
-It reads `rtk gain --format json` on session start, after the agent finishes responding, and when either command below runs.
+It reads `rtk gain --format json` on session start, after tool-using turns and agent completion, and when either command below runs.
 There is no polling, model call, or separate history file.
 If RTK is missing or its counters cannot be read, the footer entry disappears; `/rtk-gain` reports the failure.
 Custom footers must display Pi's extension statuses to show the entry.
