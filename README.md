@@ -1,7 +1,7 @@
 # Pi Extensions
 
-Six independent extensions for [Pi](https://pi.dev), covering Git commands, task progress, PhpStorm MCP integration for pi acp, RTK output filtering, and quitting a session.
-Enable only the extensions needed, or use all six together.
+Seven independent extensions for [Pi](https://pi.dev), covering Git commands, task progress, PhpStorm MCP integration for pi acp, RTK filtering and savings, and quitting a session.
+Enable only the extensions needed.
 
 ## Extensions at a glance
 
@@ -13,11 +13,12 @@ Enable only the extensions needed, or use all six together.
 | [PhpStorm MCP integration for pi acp](#phpstorm-mcp-integration-for-pi-acp) | `phpstorm-mcp/index.ts` | Connects pi acp to PhpStorm's MCP server in RPC mode only while PhpStorm is running. |
 | [Progress](#progress) | `progress/index.ts` | Opt-in, persistent task tracking with background model updates and a standalone CLI. |
 | [RTK for other Pi tools](#rtk-for-other-pi-tools) | `rtk-pi-extended/index.ts` | Filters Bash, search, and MCP results that RTK's own Pi hook misses, and reports Pi-specific coverage with `/rtk-coverage`. |
+| [RTK gain](#rtk-gain) | `rtk-gain/index.ts` | Shows local RTK token savings in the footer and reports per-sandbox totals with `/rtk-gain all`. |
 
 ## Installation
 
 Pi's Git-package method installs from the repository root, not from individual extension subdirectories.
-The root `package.json` declares all six extension entry points under `pi.extensions`.
+The root `package.json` declares the extension entry points under `pi.extensions`.
 Requires Node.js 22.19 or newer and Git.
 Install the package and select which extensions load:
 
@@ -26,7 +27,7 @@ pi install git:github.com/zaherg/pi-extensions
 pi config
 ```
 
-The package is registered globally in `~/.pi/agent/settings.json`, with all six extensions enabled by default.
+The package is registered globally in `~/.pi/agent/settings.json`, with all extensions enabled by default.
 Use `pi config` to disable those not needed.
 No build step or manual `npm install` is required; Pi supplies the declared peer dependencies.
 Remove or disable previous installations of the same extensions before reloading to avoid duplicate commands and tools.
@@ -251,6 +252,25 @@ Reports, from Pi's own session files, how much tool output each tool delivered a
 It splits Bash output by whether RTK's current rewrite rules cover the command, and shows the extension's filtered, unchanged, and failed results with real byte counts.
 These numbers are Pi-specific; `rtk gain` mixes every agent and counts rejected submissions.
 See [RTK for other Pi tools](rtk-pi-extended/README.md) for the coverage table, safety checks, and tests.
+
+## RTK gain
+
+Pi's footer shows the estimated tokens RTK saved in the current environment, for example `RTK: 12.4K tokens saved (37.5%)`.
+It reads `rtk gain --format json` on session start, after the agent finishes responding, and when either command below runs.
+There is no polling, model call, or separate history file.
+If RTK is missing or its counters cannot be read, the footer entry disappears; `/rtk-gain` reports the failure.
+Custom footers must display Pi's extension statuses to show the entry.
+
+- `/rtk-gain` shows the exact reported token counts before and after filtering, tokens saved, savings percentage, and command count for this host or sandbox.
+- `/rtk-gain all`, run on the host, adds one row per local Docker sandbox from `sbx ls --json` and a combined total for the environments that reported counters.
+  The combined percentage is total saved divided by total before, not an average of percentages.
+  Only guests listed as running are queried; stopped or unreadable guests are marked as excluded, not counted as zero.
+  If a guest stops between listing and querying, `sbx exec` can restart it.
+
+These are RTK estimates across all agents using each RTK history, not billed tokens or Pi session usage.
+Use `/rtk-coverage` for the bytes actually removed by `rtk-pi-extended` in Pi sessions.
+The two extensions can be enabled independently.
+Deleting a sandbox removes its RTK history from the combined report.
 
 ## Update or remove
 

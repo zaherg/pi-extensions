@@ -19,7 +19,8 @@
       "./wip.ts",
       "./phpstorm-mcp/index.ts",
       "./progress/index.ts",
-      "./rtk-pi-extended/index.ts"
+      "./rtk-pi-extended/index.ts",
+      "./rtk-gain/index.ts"
     ]
   }
 }
