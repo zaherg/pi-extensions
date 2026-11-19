@@ -1,0 +1,16 @@
+schema_version = 1
+
+[pipeline]
+name = "pi-extended-generic"
+extends = "rtk:default"
+
+# MCP and other extension tools. Their output is usually curated (source
+# excerpts, scraped pages), and Pi already middle-truncates MCP results at
+# 20 KB, so this rule only removes terminal escapes, long base64 runs, and
+# runs of three or more identical adjacent lines. The adapter then applies
+# lossless JSON compaction, shared-tail footnotes, and passage deduplication.
+# Append "cap" to `use` to also window outputs over 300 lines (lossy; the
+# original stays recoverable with `rtk recall`).
+[[hook.after_tool.any]]
+name = "pi-generic"
+use = ["ansi", "base64-elide", "dedup"]

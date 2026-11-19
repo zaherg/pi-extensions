@@ -1,0 +1,16 @@
+schema_version = 1
+
+[pipeline]
+name = "pi-extended-listing"
+extends = "rtk:default"
+
+# Pi's grep, find, and ls, plus FFF's ffgrep, fffind, and multi-grep.
+# `cap` keeps the first 50 and last 200 lines of outputs over 300 lines.
+# `matches` (grep-group) is not used: it skips Pi's `path:line: text` lines
+# with trailing notices and trims indentation. The adapter instead groups
+# Pi `grep` lines by file after this rule, losslessly.
+# The adapter rejects results that lose an FFF heading, a Pi notice, or the
+# final line, and keeps the original.
+[[hook.after_tool.any]]
+name = "pi-listing"
+use = ["ansi", "cap"]

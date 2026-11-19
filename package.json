@@ -19,7 +19,7 @@
       "./wip.ts",
       "./phpstorm-mcp/index.ts",
       "./progress/index.ts",
-      "./rtk-ffgrep/index.ts"
+      "./rtk-pi-extended/index.ts"
     ]
   }
 }

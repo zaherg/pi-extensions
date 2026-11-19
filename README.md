@@ -1,6 +1,6 @@
 # Pi Extensions
 
-Six independent extensions for [Pi](https://pi.dev), covering Git commands, task progress, PhpStorm MCP integration for pi acp, search-output filtering, and quitting a session.
+Six independent extensions for [Pi](https://pi.dev), covering Git commands, task progress, PhpStorm MCP integration for pi acp, RTK output filtering, and quitting a session.
 Enable only the extensions needed, or use all six together.
 
 ## Extensions at a glance
@@ -12,7 +12,7 @@ Enable only the extensions needed, or use all six together.
 | [WIP](#wip) | `wip.ts` | `/wip` to stage changes under the current directory and commit with the message `wip`. |
 | [PhpStorm MCP integration for pi acp](#phpstorm-mcp-integration-for-pi-acp) | `phpstorm-mcp/index.ts` | Connects pi acp to PhpStorm's MCP server in RPC mode only while PhpStorm is running. |
 | [Progress](#progress) | `progress/index.ts` | Opt-in, persistent task tracking with background model updates and a standalone CLI. |
-| [RTK for ffgrep](#rtk-for-ffgrep) | `rtk-ffgrep/index.ts` | Filters large `ffgrep` results through RTK while preserving access to the original output. |
+| [RTK for other Pi tools](#rtk-for-other-pi-tools) | `rtk-pi-extended/index.ts` | Filters Bash, search, and MCP results that RTK's own Pi hook misses, and reports Pi-specific coverage with `/rtk-coverage`. |
 
 ## Installation
 
@@ -221,60 +221,36 @@ There is no `/progress stop` command.
 To disable tracking while retaining history, stop all writers and move `progress.json` to a backup location.
 See [Progress details](progress/README.md) for the full CLI protocol, concurrency rules, recovery, and privacy limits.
 
-## RTK for ffgrep
+## RTK for other Pi tools
 
-An adapter for an existing `ffgrep` tool, not a search tool itself.
-Install RTK separately, ensure `rtk` is on Pi's `PATH`, and enable an FFF integration that exposes `ffgrep`.
-Pi's built-in `grep` is not a substitute for that tool name.
-The adapter was verified against RTK 1.1.0 and Pi 1.5.0; other RTK protocol versions are not assumed compatible.
+RTK's own Pi hook only rewrites Bash commands that have an RTK equivalent before they run.
+This extension reduces, after they run, the results that hook never sees:
 
-### Pipeline setup
+- Repeated `read` results become stubs naming the earlier tool call, as long as the model can still see it.
+- Lockfiles, minified files, large truncated JSON, and logs, read with `read` or printed by Bash, get labelled non-code views.
+- Bash commands RTK does not rewrite, such as scripts, `node`, `sed -n`, or test runners without an RTK filter, get RTK's `term` chain.
+- Pi's `grep`, `find`, and `ls`, plus FFF's `ffgrep`, `fffind`, and multi-grep, are windowed past 300 lines without losing FFF file headings or cursors; Pi `grep` lines are grouped by file.
+- MCP and other extension tools lose terminal escapes, base64 runs, and repeated lines, and get lossless JSON compaction, shared-tail footnotes, and passage deduplication.
 
-The pipeline ships with the extension at `rtk-ffgrep/rtk/pipeline.toml`; no user-level configuration is required.
-The adapter points `RTK_CONFIG_DIR` at that directory for its child processes.
-To customize it, edit that file with the following baseline configuration.
-If `rtk/pipelines/*.toml` or trusted project `.rtk` pipelines exist, RTK merges them according to its normal precedence.
+Code and prose stay byte-exact, so edits can rely on the text a read returned.
+Every stub and condensed view is labelled, and reading the same path and offset again returns the exact text.
+Install RTK separately and keep its Pi hook enabled; commands it rewrites are left to it.
+`ffgrep` results need an FFF integration such as `@ff-labs/pi-fff`; Pi's built-in `grep` is a different tool.
 
-```toml
-schema_version = 1
+This extension replaces the former `rtk-ffgrep` extension.
+Remove any separately installed copy of `rtk-ffgrep`; if both load, the second filter usually finds nothing left to change.
 
-[pipeline]
-name = "pi-ffgrep"
-extends = "rtk:default"
+RTK output is accepted only if it keeps the final line and Pi's full-output notices, and RTK's recall returns the exact original; otherwise the original result stays.
+Every replacement must save at least 128 bytes and 10%, and RTK is not started when none of its methods could change the output.
 
-[[hook.after_tool.any]]
-name = "ffgrep-output"
-use = ["ansi", "cap"]
+```text
+/rtk-coverage [days 1-365] [project|all]
 ```
 
-Validate the pipeline:
-
-```sh
-# Run from the extension directory (rtk-ffgrep/).
-RTK_CONFIG_DIR="$PWD/rtk" rtk pipeline validate
-RTK_CONFIG_DIR="$PWD/rtk" rtk pipeline explain --agent pi --tool ffgrep
-```
-
-RTK 1.1 classifies unknown tools as `any`, so do not add `when = { tool = "ffgrep" }` to this rule.
-The extension itself limits submissions to `ffgrep` results.
-
-### How filtering works
-
-On a successful, single-text-block `ffgrep` result, the extension sends JSON through stdin to `rtk hook claude`.
-This is a local compatibility protocol, not a Claude or other model request.
-The supplied pipeline strips terminal escapes and caps long output.
-
-A replacement is accepted only if it is smaller, preserves file headings and notices, and provides a native recall hash whose `rtk recall --full` output exactly matches the original text.
-Errors, structured or mixed results, unsupported responses, timeouts, or failed recall checks leave the original output intact.
-Each RTK process has a two-second timeout and a two-MiB output limit.
-
-Accepted text is shown in Pi, sent to the model as the tool result, and saved in the session.
-The full original is recoverable through RTK's local recall storage.
-The adapter sets `RTK_CONFIG_DIR` only for its child processes; it does not change the session environment or patch RTK, FFF, or another RTK extension.
-
-To bypass filtering, start Pi with `RTK_DISABLED=1`, or set `enabled = false` on the pipeline rule.
-Pipeline edits apply to subsequent calls; extension source changes require `/reload` or a restart.
-See [RTK adapter details](rtk-ffgrep/README.md) for recall storage, compatibility checks, and limitations.
+Reports, from Pi's own session files, how much tool output each tool delivered and which integration owns it.
+It splits Bash output by whether RTK's current rewrite rules cover the command, and shows the extension's filtered, unchanged, and failed results with real byte counts.
+These numbers are Pi-specific; `rtk gain` mixes every agent and counts rejected submissions.
+See [RTK for other Pi tools](rtk-pi-extended/README.md) for the coverage table, safety checks, and tests.
 
 ## Update or remove
 

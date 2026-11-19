@@ -5,19 +5,23 @@ import { TextDecoder } from "node:util";
 const MAX_BYTES = 2 * 1024 * 1024;
 const TIMEOUT_MS = 2_000;
 const NUMBERED_LINE = /^ \d+[:-] /;
-const RECALL_HINT = /\n\[full output: rtk recall ([a-f0-9]{16})\]$/;
+/** Native RTK sqlite recall hint; RTK appends it as the final line of a changed output. */
+export const RECALL_HINT = /\n\[full output: rtk recall ([a-f0-9]{16})\]$/;
 
-export type Failure =
-	| "unavailable"
-	| "process"
-	| "timeout"
-	| "aborted"
-	| "input-limit"
-	| "output-limit"
-	| "protocol"
-	| "boundaries"
-	| "recovery"
-	| "unexpected";
+export const FAILURES = [
+	"unavailable",
+	"process",
+	"timeout",
+	"aborted",
+	"input-limit",
+	"output-limit",
+	"protocol",
+	"boundaries",
+	"recovery",
+	"unexpected",
+] as const;
+
+export type Failure = (typeof FAILURES)[number];
 
 export interface ProcessOptions {
 	cwd: string;
@@ -182,16 +186,31 @@ export function preservesBoundaries(
 	return true;
 }
 
-export async function filterFfgrep(
+/** Decides whether a smaller RTK replacement kept the structure readers rely on. */
+export type StructureCheck = (original: string, filtered: string) => boolean;
+
+/**
+ * Run one text result through RTK's native post-tool pipeline.
+ * `toolName` must not match a Claude Code tool name or an `mcp__` prefix,
+ * so RTK classifies it as `any` and applies only the configured `any` rules.
+ *
+ * RTK appends a recall hint only after its store saved the original. With
+ * `verifyRecall: false` the readback is skipped, unless the original itself
+ * ends like a hint and could pass for one.
+ */
+export async function filterPosthook(
+	toolName: string,
 	text: string,
 	options: ProcessOptions,
+	preservesStructure: StructureCheck,
+	verifyRecall = true,
 ): Promise<Result> {
 	const response = await invokeRtk(
 		["hook", "claude"],
 		JSON.stringify({
 			hook_event_name: "PostToolUse",
-			tool_name: "ffgrep",
-			// RTK 1.1 does not expose unknown-tool inputs as pipeline facts.
+			tool_name: toolName,
+			// RTK 1.x does not expose unknown-tool inputs as pipeline facts.
 			// Do not forward prompts, transcript paths, or unrelated tool metadata.
 			tool_input: {},
 			tool_response: { content: [{ type: "text", text }] },
@@ -210,7 +229,7 @@ export async function filterFfgrep(
 	) {
 		return { kind: "unchanged" };
 	}
-	if (!preservesBoundaries(text, filtered)) {
+	if (!preservesStructure(text, filtered)) {
 		return { kind: "failed", reason: "boundaries" };
 	}
 
@@ -218,9 +237,11 @@ export async function filterFfgrep(
 	// Readback also prevents a source line resembling a recall hint from being trusted.
 	const hash = RECALL_HINT.exec(filtered)?.[1];
 	if (!hash) return { kind: "failed", reason: "recovery" };
-	const recalled = await invokeRtk(["recall", hash, "--full"], "", options);
-	if (!recalled.ok) return { kind: "failed", reason: recalled.reason };
-	if (recalled.stdout !== text) return { kind: "failed", reason: "recovery" };
+	if (verifyRecall || RECALL_HINT.test(text)) {
+		const recalled = await invokeRtk(["recall", hash, "--full"], "", options);
+		if (!recalled.ok) return { kind: "failed", reason: recalled.reason };
+		if (recalled.stdout !== text) return { kind: "failed", reason: "recovery" };
+	}
 	if (options.signal?.aborted) return { kind: "failed", reason: "aborted" };
 	return { kind: "filtered", text: filtered };
 }
