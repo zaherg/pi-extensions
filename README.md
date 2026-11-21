@@ -147,7 +147,7 @@ At `session_start`, the extension:
    - **Windows (`win32`):** Queries `Win32_Process` via `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` (absolute, never resolved from the working directory) for `phpstorm64.exe` or `phpstorm.exe`, excluding `stdioMcpServer` command lines.
    - Process checks have a **2-second timeout** and **1 MiB output limit**, and sanitize child-process errors so process arguments are never leaked.
 3. If PhpStorm is not running, exits silently without registering MCP. If the process query itself fails, throws a descriptive error without registering.
-4. Reads `~/.pi/agent/pi-phpstorm-mcp.json` and calls `pi.registerMcpServer("phpstorm", config)` for the current session.
+4. Reads `~/.pi/agent/pi-phpstorm-mcp.json` (creating it automatically with default values if missing) and calls `pi.registerMcpServer("phpstorm", config)` for the current session.
 
 ### Setup and configuration
 
@@ -170,7 +170,7 @@ At `session_start`, the extension:
 
 ### Caveats
 
-- **`~/.pi/agent/pi-phpstorm-mcp.json` is required:** If the file is missing (`ENOENT`), nothing is registered and a warning names the expected path; there is no built-in fallback command. The file is used as-is (no field merging). Unreadable files or invalid JSON throw an error.
+- **Auto-created defaults (`~/.pi/agent/pi-phpstorm-mcp.json`):** If the file is missing (`ENOENT`), it is created (`0600`) with `~/Applications/PhpStorm.app/Contents/MacOS/phpstorm` (derived from `os.homedir()`) and port `64442`. Edit it if PhpStorm is installed elsewhere or uses another port; an existing file replaces the defaults completely (no field merging), and unreadable files or invalid JSON throw an error without overwriting the file.
 - **Avoid duplicate `mcp.json` entries:** Defining `phpstorm` in global or project `mcp.json` overrides `registerMcpServer` and connects in every Pi mode regardless of whether PhpStorm is open.
 - **Session-start check only:** The extension does not launch PhpStorm, poll for IDE startup/shutdown mid-session, distinguish JetBrains from other RPC clients while PhpStorm is open, or health-check the MCP port. If PhpStorm is started after the RPC session, restart the session.
 

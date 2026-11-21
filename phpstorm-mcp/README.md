@@ -15,12 +15,12 @@ It is not an ACP adapter or an MCP server itself; Pi's built-in MCP support hand
 
 At `session_start`, the extension checks `ctx.mode`:
 
-- In RPC mode, it checks whether PhpStorm is running locally before reading the optional JSON configuration and registering the server as `phpstorm`.
+- In RPC mode, it checks whether PhpStorm is running locally before reading (or creating) `~/.pi/agent/pi-phpstorm-mcp.json` and registering the server as `phpstorm`.
 - If PhpStorm is closed, it silently skips configuration loading and registration.
-- In terminal UI, print, and JSON modes, it does not inspect applications, read the configuration, or register the server.
+- In terminal UI, print, and JSON modes, it does not inspect applications, read or create the configuration, or register the server.
 
 Loading the extension for discovery alone does not register a server.
-Registration lasts for the current session and does not modify Pi's MCP configuration files.
+Registration lasts for the current session and does not modify Pi's global `mcp.json`.
 
 The check applies to all RPC clients, not just JetBrains.
 It does not detect which client launched Pi, so another ACP/RPC client can still connect while PhpStorm is open.
@@ -54,7 +54,7 @@ pi install git:github.com/zaherg/pi-phpstorm-mcp
 
 Pi manages the Git checkout and records the package in `~/.pi/agent/settings.json`.
 You do not need to clone the repository manually.
-Create the server configuration file (see below), then restart the existing Pi ACP session.
+Configure `~/.pi/agent/pi-phpstorm-mcp.json` if the defaults below do not match your installation, then restart the existing Pi ACP session.
 
 Remove the Git-installed package with:
 
@@ -70,9 +70,7 @@ Use `pi remove "$PWD"` from the same directory to remove a local installation.
 
 The extension reads `~/.pi/agent/pi-phpstorm-mcp.json` at the start of each RPC session when PhpStorm is running and registers it as `phpstorm`.
 The file contains one MCP server configuration object, without an `mcpServers` wrapper.
-The file is required: there are no built-in defaults, because the executable path and MCP port differ per installation.
-If it does not exist, the extension registers nothing and shows a warning naming the expected path.
-Create it with the executable path, arguments, and port supplied by PhpStorm's MCP settings, for example:
+If the file does not exist yet, the extension creates it automatically (with `0600` permissions) using the current user's home directory and JetBrains Toolbox's standard macOS path:
 
 ```json
 {
@@ -80,14 +78,16 @@ Create it with the executable path, arguments, and port supplied by PhpStorm's M
   "env": {
     "IJ_MCP_SERVER_PORT": "64442"
   },
-  "command": "/Applications/PhpStorm.app/Contents/MacOS/phpstorm",
-  "args": ["stdioMcpServer"]
+  "command": "<HOME>/Applications/PhpStorm.app/Contents/MacOS/phpstorm",
+  "args": [
+    "stdioMcpServer"
+  ]
 }
 ```
 
-Restart the Pi ACP session after changing the file.
-The extension does not create the file automatically.
-Unreadable files and malformed JSON report an error with the file path.
+If PhpStorm is installed elsewhere (for example `/Applications/PhpStorm.app/...` or on Linux/Windows) or uses a different MCP port, edit `~/.pi/agent/pi-phpstorm-mcp.json` with the executable path, arguments, and port supplied by PhpStorm's MCP settings, then restart the Pi ACP session.
+An existing file replaces the defaults completely rather than merging with them.
+Unreadable files and malformed JSON report an error with the file path without overwriting the file.
 Pi validates the server configuration and rejects invalid settings.
 
 Do not also add `phpstorm` to `~/.pi/agent/mcp.json` or the project's `.pi/mcp.json` if it should remain RPC-only.
@@ -102,7 +102,7 @@ Run the dependency-free tests with Node.js 22.19 or later:
 npm test
 ```
 
-Tests cover JSON configuration, a missing file (no registration), configuration changes between sessions, and file errors.
+Tests cover JSON configuration, automatic default-file creation when missing, configuration changes between sessions, and file errors.
 They also exercise the extension's registration boundary for RPC, TUI, print, and JSON sessions, and verify that discovery alone does not inspect applications or register a server.
 Detection tests cover running and closed applications, leftover bridges, unrelated process mentions, repeated session checks, and failed or incomplete process queries.
 The tests use simulated process-query results and a simulated macOS application registry; they do not launch PhpStorm or verify a live IDE connection.

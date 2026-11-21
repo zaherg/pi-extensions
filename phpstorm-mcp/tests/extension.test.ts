@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { beforeEach } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -14,18 +14,23 @@ import phpstormMcp from "../index.ts";
 
 type SessionStartHandler = ExtensionHandler<SessionStartEvent>;
 
+let home: string;
 let configPath: string;
 
 beforeEach((t) => {
 	assert.ok("after" in t);
-	const home = mkdtempSync(fileURLToPath(new URL(".home-", import.meta.url)));
+	home = mkdtempSync(fileURLToPath(new URL(".home-", import.meta.url)));
 	const previousHome = process.env.HOME;
+	const previousUserProfile = process.env.USERPROFILE;
 	process.env.HOME = home;
+	process.env.USERPROFILE = home;
 	configPath = join(home, ".pi", "agent", "pi-phpstorm-mcp.json");
 	mkdirSync(join(home, ".pi", "agent"), { recursive: true });
 	t.after(() => {
 		if (previousHome === undefined) delete process.env.HOME;
 		else process.env.HOME = previousHome;
+		if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+		else process.env.USERPROFILE = previousUserProfile;
 		rmSync(home, { recursive: true, force: true });
 	});
 });
@@ -38,7 +43,6 @@ function loadExtension(exec: ExtensionAPI["exec"] = async () => success(runningO
 	const handlers = new Map<string, SessionStartHandler[]>();
 	const registrations: { name: string; config: McpServerConfig }[] = [];
 	const checks: Parameters<ExtensionAPI["exec"]>[] = [];
-	const notices: [string, string | undefined][] = [];
 
 	// Only the Pi API members used by this extension are needed in the fixture.
 	const pi: Pick<ExtensionAPI, "on" | "registerMcpServer" | "exec"> = {
@@ -64,11 +68,9 @@ function loadExtension(exec: ExtensionAPI["exec"] = async () => success(runningO
 	return {
 		registrations,
 		checks,
-		notices,
 		async startSession(mode: ExtensionContext["mode"]) {
-			const ui = { notify: (message: string, type?: string) => notices.push([message, type]) };
 			for (const handler of handlers.get("session_start") ?? []) {
-				await handler({ type: "session_start", reason: "startup" }, { mode, hasUI: true, ui } as unknown as ExtensionContext);
+				await handler({ type: "session_start", reason: "startup" }, { mode } as ExtensionContext);
 			}
 		},
 	};
@@ -112,19 +114,25 @@ test("reads changed configuration on the next session start", async () => {
 	]);
 });
 
-test("registers nothing and asks for configuration when the file is missing", async () => {
+test("creates the default configuration file using the current home directory when missing", async () => {
+	rmSync(join(home, ".pi"), { recursive: true, force: true });
 	const extension = loadExtension();
 	await extension.startSession("rpc");
 
-	// No machine-specific fallback command is ever registered.
-	assert.deepEqual(extension.registrations, []);
-	assert.equal(extension.notices.length, 1);
-	assert.equal(extension.notices[0][1], "warning");
-	assert.ok(extension.notices[0][0].includes(configPath));
+	const expected = {
+		type: "stdio",
+		env: { IJ_MCP_SERVER_PORT: "64442" },
+		command: join(home, "Applications", "PhpStorm.app", "Contents", "MacOS", "phpstorm"),
+		args: ["stdioMcpServer"],
+	};
+	assert.deepEqual(extension.registrations, [{ name: "phpstorm", config: expected }]);
+	const written = readFileSync(configPath, "utf8");
+	assert.ok(written.endsWith("\n"));
+	assert.deepEqual(JSON.parse(written), expected);
 });
 
 for (const scenario of ["malformed", "unreadable"]) {
-	test(`reports the config path for ${scenario} configuration without registering`, async () => {
+	test(`reports the config path for ${scenario} configuration without registering or overwriting`, async () => {
 		if (scenario === "malformed") writeFileSync(configPath, "{ invalid json");
 		if (scenario === "unreadable") mkdirSync(configPath);
 		const extension = loadExtension();
@@ -135,13 +143,17 @@ for (const scenario of ["malformed", "unreadable"]) {
 			return true;
 		});
 		assert.deepEqual(extension.registrations, []);
+		if (scenario === "malformed") assert.equal(readFileSync(configPath, "utf8"), "{ invalid json");
 	});
 }
 
 for (const mode of ["tui", "print", "json"] as const) {
-	test(`does not read config or register PhpStorm in ${mode} mode`, async () => {
-		writeFileSync(configPath, "{ invalid json");
+	test(`does not read or create config or register PhpStorm in ${mode} mode`, async () => {
 		const extension = loadExtension();
+		await extension.startSession(mode);
+		assert.equal(existsSync(configPath), false);
+
+		writeFileSync(configPath, "{ invalid json");
 		await extension.startSession(mode);
 
 		assert.deepEqual(extension.registrations, []);
@@ -156,16 +168,18 @@ test("does not inspect processes, read config, or register during extension disc
 	assert.deepEqual(extension.checks, []);
 });
 
-test("skips configuration and registration when PhpStorm is closed", async () => {
-	writeFileSync(configPath, "{ invalid json");
+test("skips configuration loading, creation, and registration when PhpStorm is closed", async () => {
 	const extension = loadExtension(async () => success(stoppedOutput));
 	await extension.startSession("rpc");
-	assert.equal(extension.checks.length, 1);
+	assert.equal(existsSync(configPath), false);
+
+	writeFileSync(configPath, "{ invalid json");
+	await extension.startSession("rpc");
+	assert.equal(extension.checks.length, 2);
 	assert.deepEqual(extension.registrations, []);
 });
 
 test("checks again on the next session after PhpStorm opens", async () => {
-	writeFileSync(configPath, JSON.stringify({ command: "phpstorm" }));
 	let running = false;
 	const extension = loadExtension(async () => success(running ? runningOutput : stoppedOutput));
 	await extension.startSession("rpc");
@@ -174,6 +188,7 @@ test("checks again on the next session after PhpStorm opens", async () => {
 	await extension.startSession("rpc");
 	assert.equal(extension.checks.length, 2);
 	assert.equal(extension.registrations.length, 1);
+	assert.equal(existsSync(configPath), true);
 });
 
 test("refuses registration when the running-application query fails", async () => {
@@ -181,5 +196,6 @@ test("refuses registration when the running-application query fails", async () =
 	await assert.rejects(extension.startSession("rpc"), {
 		message: "Failed to check whether PhpStorm is running: process query failed; MCP was not registered.",
 	});
+	assert.equal(existsSync(configPath), false);
 	assert.deepEqual(extension.registrations, []);
 });
