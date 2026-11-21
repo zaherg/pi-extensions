@@ -1,7 +1,14 @@
 import { type SpawnSyncReturns, spawnSync } from "node:child_process";
 import { setImmediate } from "node:timers/promises";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import type {
+	CustomEntry,
+	EntryRenderOptions,
+	ExtensionAPI,
+	ExtensionCommandContext,
+	KeybindingsManager,
+	Theme,
+} from "@earendil-works/pi-coding-agent";
+import { type Component, Text, type TUI } from "@earendil-works/pi-tui";
 import {
 	CAPTURE_BYTES,
 	gitResultMessage,
@@ -10,26 +17,29 @@ import {
 
 export function gitShellCommand(args: string): string {
 	if (!args.trim()) return "git";
-	// Only the standalone quoted-message shorthand differs from native Git syntax.
+	// Rewrite standalone quoted commit messages into git commit -m.
 	const message =
 		/^[ \t]*commit[ \t]+("(?:[^"\\]|\\[\s\S])*"|'[^']*')[ \t\r\n]*$/.exec(args);
 	return message ? `git commit -m ${message[1]}` : `git ${args}`;
 }
 
-export default function (pi: ExtensionAPI) {
+export default function gitExtension(pi: ExtensionAPI): void {
 	let running = false;
 
-	// Custom entries render in the transcript without becoming model context.
-	pi.registerEntryRenderer<string>("git-output", (entry, _options, theme) => {
-		const message =
-			typeof entry.data === "string" ? entry.data : "Invalid saved Git output.";
-		return new Text(`${theme.fg("accent", "/git")}\n${message}`, 1, 0);
-	});
+	// Render custom Git entries in the transcript without sending them to the model.
+	pi.registerEntryRenderer<string>(
+		"git-output",
+		(entry: CustomEntry<string>, _options: EntryRenderOptions, theme: Theme): Component => {
+			const message =
+				typeof entry.data === "string" ? entry.data : "Invalid saved Git output.";
+			return new Text(`${theme.fg("accent", "/git")}\n${message}`, 1, 0);
+		},
+	);
 
 	pi.registerCommand("git", {
 		description:
 			'Run any Git command with inline results; commit "message" means commit -m "message"',
-		handler: async (args, ctx) => {
+		handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
 			if (ctx.mode !== "tui") {
 				throw new Error("/git requires Pi's interactive terminal.");
 			}
@@ -42,18 +52,22 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			running = true;
-			// Ctrl+C must not terminate Pi during terminal handoff.
-			const ignoreSigint = () => {};
+			// Prevent Ctrl+C from terminating Pi during terminal handoff.
+			const ignoreSigint = (): void => {};
 			process.on("SIGINT", ignoreSigint);
 			let message: string;
 			try {
 				const result = await ctx.ui.custom<SpawnSyncReturns<Buffer>>(
-					(tui, _theme, _keybindings, done) => {
+					(
+						tui: TUI,
+						_theme: Theme,
+						_keybindings: KeybindingsManager,
+						done: (result: SpawnSyncReturns<Buffer>) => void,
+					): Component => {
 						let result: SpawnSyncReturns<Buffer>;
 						tui.stop();
 						try {
-							// This is explicitly user-authored shell source, not interpolated file data.
-							// Keep cwd outside the shell source, including paths containing metacharacters.
+							// Pass cwd outside the shell string so path metacharacters are not interpreted.
 							result = spawnSync(
 								"/bin/bash",
 								terminalCaptureArgs(
@@ -71,7 +85,7 @@ export default function (pi: ExtensionAPI) {
 							tui.requestRender(true);
 						}
 						done(result);
-						return { render: () => [], invalidate() {} };
+						return { render: (): string[] => [], invalidate(): void {} };
 					},
 				);
 
@@ -79,12 +93,11 @@ export default function (pi: ExtensionAPI) {
 					? "Git shell could not be started. Check SHELL and the project directory."
 					: gitResultMessage(result.stdout, result.status, result.signal);
 			} catch {
-				// Shell errors can contain credentials; never copy them into Pi's transcript.
+				// Avoid copying shell errors that could contain credentials into the transcript.
 				message =
 					"Git terminal execution failed. Check git status before retrying.";
 			} finally {
-				// spawnSync defers signals. Two check phases allow an intervening poll
-				// before restoring the default handler, even when invoked from I/O.
+				// Wait two check phases so deferred SIGINT signals drain before restoring the listener.
 				await setImmediate();
 				await setImmediate();
 				process.removeListener("SIGINT", ignoreSigint);
@@ -92,9 +105,9 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			try {
-				pi.appendEntry("git-output", message);
+				pi.appendEntry<string>("git-output", message);
 			} catch {
-				// A persistence error must not misreport execution or cause a retry.
+				// Warn instead of failing after Git has already executed.
 				ctx.ui.notify(
 					`Could not save Git's inline result.\n${message}`,
 					"warning",

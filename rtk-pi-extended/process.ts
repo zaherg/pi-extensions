@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { relative, sep } from "node:path";
+import type { ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { type Failure, RECALL_HINT, type Result } from "./bridge.ts";
 import { compactJsonDocument, factorSuffixes, groupGrep } from "./compact.ts";
 import {
@@ -10,6 +11,7 @@ import {
 	type PassageIndex,
 	type ReadIndex,
 } from "./dedup.ts";
+import type { Gate } from "./gate.ts";
 import type { Sample } from "./outcomes.ts";
 import {
 	hasRawTerminalOutput,
@@ -27,19 +29,15 @@ import {
 	truncateLongLines,
 } from "./views.ts";
 
-/** Indentation is only stripped from JSON excerpts this large; smaller files are usually edited. */
+/** Minimum byte size before JSON indentation is stripped from read excerpts. */
 const LARGE_JSON_BYTES = 16 * 1024;
 
-export interface Call {
-	toolName: string;
-	toolCallId: string;
-	input: Record<string, unknown>;
-}
+export type Call = Pick<ToolResultEvent, "toolName" | "toolCallId" | "input">;
 
 export interface Dependencies {
 	cwd: string;
-	/** Whether the profile's RTK rule could change `text`; `false` skips the process. */
-	gate: (pipeline: Pipeline, text: string) => boolean;
+	/** Fast pre-check returning false when a pipeline rule cannot modify text. */
+	gate: Gate;
 	/** Run RTK's post-tool pipeline for a profile. */
 	rtk: (toolName: string, text: string, pipeline: Pipeline) => Promise<Result>;
 	context: () => ContextResults;
@@ -51,7 +49,7 @@ export interface Processed {
 	/** Replacement text, present only for an accepted change. */
 	text?: string;
 	sample: Sample;
-	/** RTK failure worth reporting; the original or a lossless rewrite was kept. */
+	/** Recoverable RTK failure recorded while keeping safe output. */
 	failure?: Failure;
 }
 
@@ -105,17 +103,26 @@ interface Condensed {
 	failure?: Failure;
 }
 
-/**
- * Non-code views. Every one starts with a header saying it is not the file's
- * literal text, so it cannot be mistaken for `edit` input.
- */
+interface DedupStub {
+	text: string;
+	mechanism: string;
+	complete: boolean;
+}
+
+interface RtkStepResult {
+	text: string;
+	mechanisms: string[];
+	failure?: Failure;
+}
+
+/** Build a condensed non-code view prefixed with a warning against direct edits. */
 async function condense(
 	route: Route & { path: string },
 	call: Call,
 	view: ReadView | undefined,
 	deps: Dependencies,
 ): Promise<Condensed | undefined> {
-	// Pi's continuation notice, or Bash's truncation notice, stays verbatim.
+	// Keep Pi's read continuation or Bash truncation notice verbatim.
 	const { body, trailer: notice } = view
 		? { body: view.body, trailer: view.notice }
 		: splitBashTrailer(route.text);
@@ -123,7 +130,7 @@ async function condense(
 	const range = view
 		? `lines ${view.start}-${view.start + view.lines.length - 1} of ${where}`
 		: where;
-	const header = (what: string) =>
+	const header = (what: string): string =>
 		`[rtk-pi-extended] ${what} ${range}. This is not the file's literal text; do not copy it into edit. ${
 			call.toolName === "read"
 				? "Read the same path and offset again for the exact text."
@@ -150,7 +157,7 @@ async function condense(
 				),
 			};
 		case "json":
-			// Whole small files are usually read in order to edit them.
+			// Leave small or complete JSON files intact because they are commonly read before editing.
 			if (
 				Buffer.byteLength(body) < LARGE_JSON_BYTES ||
 				(view !== undefined && view.notice === undefined)
@@ -179,10 +186,7 @@ async function condense(
 	}
 }
 
-/**
- * Points at an earlier read for the lines it shares with this view. Lines
- * outside the overlap are delivered verbatim, separated by marker lines.
- */
+/** Format a stub referencing an earlier read for shared lines while keeping unique lines verbatim. */
 function readStub(view: ReadView, where: string, shared: Overlap): string {
 	const end = view.start + view.lines.length - 1;
 	const call = shared.source.toolCallId;
@@ -205,17 +209,17 @@ function readStub(view: ReadView, where: string, shared: Overlap): string {
 	);
 }
 
-/** A stub pointing at an earlier read the model can still see, if worth delivering. */
+/** Build a deduplication stub pointing at an earlier model-visible read when worthwhile. */
 function dedupStub(
 	path: string,
 	text: string,
 	view: ReadView,
 	deps: Dependencies,
-) {
-	// Only text the model can still see is referenced; compaction and pruning drop it.
+): DedupStub | undefined {
+	// Reference only earlier reads that remain visible in the projected session context.
 	const shared = deps.reads
 		.overlaps(path, view)
-		.find(({ source }) =>
+		.find(({ source }: Overlap) =>
 			deps.context().get(source.toolCallId)?.includes(source.body),
 		);
 	if (!shared) return undefined;
@@ -246,7 +250,7 @@ async function processRead(
 	}
 	const stub = view ? dedupStub(path, text, view, deps) : undefined;
 	let best: { text: string; mechanism: string } | undefined = stub;
-	// A partial stub still carries file lines; a non-code view of them may be smaller.
+	// Check whether a condensed non-code view beats a partial overlap stub.
 	const condensed = stub?.complete
 		? undefined
 		: await condense(route, call, view, deps);
@@ -259,7 +263,7 @@ async function processRead(
 	)
 		best = condensed;
 	if (best) {
-		// After a Bash view, a read of any range of the file returns the exact text.
+		// Mark ANY_START after a Bash file view so reading any range returns exact text.
 		deps.reads.markReplaced(path, view?.start ?? ANY_START);
 		return {
 			text: best.text,
@@ -313,28 +317,28 @@ async function processTerminal(
 	return { sample: sample(call, route, "rtk:terminal", text) };
 }
 
-/** RTK runs first so its recall stores the true original; lossless rewrites follow. */
+/** Run RTK before lossless rewrites so recall stores the unmodified original text. */
 async function runRtkStep(
 	route: Route,
 	call: Call,
 	pipeline: Pipeline,
 	deps: Dependencies,
-) {
+): Promise<RtkStepResult> {
 	if (!deps.gate(pipeline, route.text))
-		return { text: route.text, mechanisms: [] as string[] };
+		return { text: route.text, mechanisms: [] };
 	const result = await deps.rtk(call.toolName, route.text, pipeline);
 	if (result.kind === "failed")
 		return {
 			text: route.text,
-			mechanisms: [] as string[],
+			mechanisms: [],
 			failure: result.reason,
 		};
 	return result.kind === "filtered"
 		? { text: result.text, mechanisms: [`rtk:${pipeline}`] }
-		: { text: route.text, mechanisms: [] as string[] };
+		: { text: route.text, mechanisms: [] };
 }
 
-/** Each lossless step must pay for itself; the whole result is then held to `worthReplacing`. */
+/** Return true when a rewrite reduces UTF-8 byte length. */
 function shrinks(before: string, after: string): boolean {
 	return Buffer.byteLength(after) < Buffer.byteLength(before);
 }
@@ -423,7 +427,7 @@ async function processGeneric(
 	return processed;
 }
 
-/** Decide one routed result. Never throws for RTK failures; those keep the original. */
+/** Process one routed tool result and fall back to the original on RTK failure. */
 export async function processRoute(
 	route: Route,
 	call: Call,

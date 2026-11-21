@@ -1,13 +1,23 @@
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	SessionEntry,
+} from "@earendil-works/pi-coding-agent";
 import { displayLabel, displayTail } from "../shared/display.ts";
 
 const PAGE_SIZE = 25;
 const OLDER = "Older results →";
 const NEWER = "← Newer results";
 
+interface TraceItem {
+	id: string;
+	time: string;
+	msg: ToolResultMessage;
+}
+
 function diagnostic(content: ToolResultMessage["content"]): string {
-	// Keep only a bounded tail; never load files named in output or render images/details.
+	// Keep only a bounded text tail without loading referenced files or rendering images.
 	let text = "";
 	let cut = false;
 	if (Array.isArray(content)) {
@@ -21,7 +31,7 @@ function diagnostic(content: ToolResultMessage["content"]): string {
 				continue;
 			const space = 16_384 - text.length - (text ? 1 : 0);
 			if (space <= 0) {
-				// Whole earlier blocks were dropped; the leading newline keeps this one intact.
+				// Prepend a newline when earlier blocks were dropped so this block stays intact.
 				text = `\n${text}`;
 				cut = true;
 				break;
@@ -40,18 +50,18 @@ function diagnostic(content: ToolResultMessage["content"]): string {
 	);
 }
 
-export default function trace(pi: ExtensionAPI) {
+export default function trace(pi: ExtensionAPI): void {
 	let branch = new AbortController();
-	pi.on("session_tree", () => {
+	pi.on("session_tree", (): void => {
 		branch.abort();
 		branch = new AbortController();
 	});
-	pi.on("session_shutdown", () => branch.abort());
+	pi.on("session_shutdown", (): void => branch.abort());
 
 	pi.registerCommand("trace", {
 		description:
 			"Inspect recorded tool results on this branch: /trace [failed [tool]]",
-		handler: async (args, ctx) => {
+		handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
 			if (!ctx.hasUI)
 				throw new Error("/trace requires an interactive Pi or RPC UI.");
 			const [filter, tool, extra] = args.trim().split(/\s+/u);
@@ -61,7 +71,7 @@ export default function trace(pi: ExtensionAPI) {
 			}
 			const results = ctx.sessionManager
 				.getBranch()
-				.flatMap((entry) => {
+				.flatMap((entry: SessionEntry): TraceItem[] => {
 					if (entry.type !== "message" || entry.message.role !== "toolResult")
 						return [];
 					const msg = entry.message;
@@ -82,7 +92,7 @@ export default function trace(pi: ExtensionAPI) {
 			for (;;) {
 				const page = results.slice(offset, offset + PAGE_SIZE);
 				const labels = page.map(
-					({ id, time, msg }, i) =>
+					({ id, time, msg }: TraceItem, i: number): string =>
 						`${offset + i + 1}. ${msg.isError ? "failed" : "ok"} ${displayLabel(msg.toolName, 64) || "?"} · ${displayLabel(time, 32) || "?"} · #${displayLabel(id, 36) || "?"}`,
 				);
 				const options = [...labels];
@@ -98,10 +108,11 @@ export default function trace(pi: ExtensionAPI) {
 				else if (pick === OLDER) offset += PAGE_SIZE;
 				else {
 					const selected = page[labels.indexOf(pick)];
+					if (!selected) return;
 					if (
 						!ctx.sessionManager
 							.getBranch()
-							.some((entry) => entry.id === selected.id)
+							.some((entry: SessionEntry) => entry.id === selected.id)
 					) {
 						ctx.ui.notify(
 							"The selected result is no longer on this branch.",

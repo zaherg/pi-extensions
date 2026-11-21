@@ -6,7 +6,7 @@ import { resolveExecutable } from "../shared/executable.ts";
 const MAX_BYTES = 2 * 1024 * 1024;
 const TIMEOUT_MS = 2_000;
 const NUMBERED_LINE = /^ \d+[:-] /;
-/** Native RTK sqlite recall hint; RTK appends it as the final line of a changed output. */
+/** Pattern matching the recall hint RTK appends as the final line of filtered output. */
 export const RECALL_HINT = /\n\[full output: rtk recall ([a-f0-9]{16})\]$/;
 
 export const FAILURES = [
@@ -27,15 +27,15 @@ export type Failure = (typeof FAILURES)[number];
 export interface ProcessOptions {
 	cwd: string;
 	configDirectory: string;
-	signal?: AbortSignal;
-	// Overrides are for isolated checks, never loaded from pipeline configuration.
-	executable?: string;
-	env?: NodeJS.ProcessEnv;
-	timeoutMs?: number;
-	maxBytes?: number;
+	signal?: AbortSignal | undefined;
+	// Allow process overrides for isolated checks without exposing them to pipeline configs.
+	executable?: string | undefined;
+	env?: NodeJS.ProcessEnv | undefined;
+	timeoutMs?: number | undefined;
+	maxBytes?: number | undefined;
 }
 
-type ProcessResult =
+export type ProcessResult =
 	| { ok: true; stdout: string }
 	| { ok: false; reason: Failure };
 
@@ -44,7 +44,7 @@ export type Result =
 	| { kind: "filtered"; text: string }
 	| { kind: "failed"; reason: Failure };
 
-/** Send data through stdin, never a shell or the process argument list. */
+/** Spawn RTK and pass input over stdin without invoking a shell. */
 export async function invokeRtk(
 	args: string[],
 	input: string,
@@ -56,11 +56,11 @@ export async function invokeRtk(
 		return { ok: false, reason: "input-limit" };
 	}
 
-	// On Windows a bare name would also match an rtk.exe planted in the project cwd.
+	// Resolve bare executables from PATH so Windows never runs an rtk.exe from cwd.
 	const executable = resolveExecutable(options.executable ?? "rtk");
 	if (!executable) return { ok: false, reason: "unavailable" };
 
-	return new Promise((resolve) => {
+	return new Promise<ProcessResult>((resolve) => {
 		const grouped = process.platform !== "win32";
 		const child = spawn(executable, args, {
 			cwd: options.cwd,
@@ -77,27 +77,27 @@ export async function invokeRtk(
 		let failure: Failure | undefined;
 		let size = 0;
 		const output: Buffer[] = [];
-		const finish = (result: ProcessResult) => {
+		const finish = (result: ProcessResult): void => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
 			options.signal?.removeEventListener("abort", abort);
 			resolve(result);
 		};
-		const stop = (reason: Failure) => {
+		const stop = (reason: Failure): void => {
 			failure ??= reason;
 			if (!child.pid) return;
 			try {
-				// RTK rules can spawn helpers. Kill the whole isolated group on Unix.
+				// Kill the entire isolated process group on Unix so spawned helpers terminate.
 				if (grouped) process.kill(-child.pid, "SIGKILL");
 				else child.kill("SIGKILL");
-			} catch (error) {
+			} catch (error: unknown) {
 				if (!isRecord(error) || error.code !== "ESRCH") {
 					child.kill("SIGKILL");
 				}
 			}
 		};
-		const abort = () => stop("aborted");
+		const abort = (): void => stop("aborted");
 		const timer = setTimeout(
 			() => stop("timeout"),
 			options.timeoutMs ?? TIMEOUT_MS,
@@ -105,26 +105,26 @@ export async function invokeRtk(
 		options.signal?.addEventListener("abort", abort, { once: true });
 		if (options.signal?.aborted) abort();
 
-		child.on("error", (error) => {
-			const reason =
+		child.on("error", (error: NodeJS.ErrnoException): void => {
+			const reason: Failure =
 				isRecord(error) && error.code === "ENOENT" ? "unavailable" : "process";
 			finish({ ok: false, reason: failure ?? reason });
 		});
-		child.stdin.on("error", () => stop("process"));
-		const collect = (chunk: Buffer, stdout: boolean) => {
+		child.stdin.on("error", (): void => stop("process"));
+		const collect = (chunk: Buffer, stdout: boolean): void => {
 			size += chunk.length;
 			if (size > maxBytes) stop("output-limit");
 			else if (stdout && !failure) output.push(chunk);
 		};
-		child.stdout.on("data", (chunk: Buffer) => collect(chunk, true));
-		// Count stderr toward the limit, but never expose its contents.
-		child.stderr.on("data", (chunk: Buffer) => collect(chunk, false));
-		child.on("close", (code) => {
+		child.stdout.on("data", (chunk: Buffer): void => collect(chunk, true));
+		// Count stderr toward the byte limit without exposing its contents.
+		child.stderr.on("data", (chunk: Buffer): void => collect(chunk, false));
+		child.on("close", (code: number | null): void => {
 			if (failure || code !== 0) {
 				finish({ ok: false, reason: failure ?? "process" });
 			} else {
 				try {
-					// Lossy UTF-8 decoding could make corrupted recall bytes compare equal.
+					// Decode UTF-8 strictly so corrupted recall bytes cannot compare equal.
 					const stdout = new TextDecoder("utf-8", {
 						fatal: true,
 						ignoreBOM: true,
@@ -150,23 +150,23 @@ function replacementText(stdout: string): string | undefined {
 	} catch {
 		return undefined;
 	}
-	if (!isRecord(document) || !isRecord(document.hookSpecificOutput)) return;
+	if (!isRecord(document) || !isRecord(document.hookSpecificOutput)) return undefined;
 	const hook = document.hookSpecificOutput;
 	if (hook.hookEventName !== "PostToolUse" || !isRecord(hook.updatedToolOutput))
-		return;
+		return undefined;
 	const content = hook.updatedToolOutput.content;
-	if (!Array.isArray(content) || content.length !== 1) return;
+	if (!Array.isArray(content) || content.length !== 1) return undefined;
 	const block: unknown = content[0];
 	if (
 		!isRecord(block) ||
 		block.type !== "text" ||
 		typeof block.text !== "string"
 	)
-		return;
+		return undefined;
 	return block.text;
 }
 
-/** FFF headings, annotations and notices bind numbered lines to files/pages. */
+/** Verify that file headings, annotations, and notices still bind numbered lines to their files. */
 export function preservesBoundaries(
 	original: string,
 	filtered: string,
@@ -179,8 +179,7 @@ export function preservesBoundaries(
 			expectHeading = true;
 			continue;
 		}
-		// FFF emits filenames verbatim at group boundaries. A numbered-looking
-		// filename is indistinguishable from a match in this text-only protocol.
+		// Reject headings that look like numbered match lines because the text protocol cannot distinguish them.
 		if (expectHeading && NUMBERED_LINE.test(line)) return false;
 		expectHeading = line === "[0 exact matches. Maybe you meant this?]";
 		if (NUMBERED_LINE.test(line)) continue;
@@ -191,18 +190,10 @@ export function preservesBoundaries(
 	return true;
 }
 
-/** Decides whether a smaller RTK replacement kept the structure readers rely on. */
+/** Predicate checking whether a filtered RTK output preserved required structural lines. */
 export type StructureCheck = (original: string, filtered: string) => boolean;
 
-/**
- * Run one text result through RTK's native post-tool pipeline.
- * `toolName` must not match a Claude Code tool name or an `mcp__` prefix,
- * so RTK classifies it as `any` and applies only the configured `any` rules.
- *
- * RTK appends a recall hint only after its store saved the original. With
- * `verifyRecall: false` the readback is skipped, unless the original itself
- * ends like a hint or contains the hint's hash and could have supplied it.
- */
+/** Run one text result through RTK's post-tool pipeline and verify recall integrity. */
 export async function filterPosthook(
 	toolName: string,
 	text: string,
@@ -215,8 +206,7 @@ export async function filterPosthook(
 		JSON.stringify({
 			hook_event_name: "PostToolUse",
 			tool_name: toolName,
-			// RTK 1.x does not expose unknown-tool inputs as pipeline facts.
-			// Do not forward prompts, transcript paths, or unrelated tool metadata.
+			// Omit tool inputs so prompts and metadata are never forwarded to RTK.
 			tool_input: {},
 			tool_response: { content: [{ type: "text", text }] },
 		}),
@@ -238,13 +228,10 @@ export async function filterPosthook(
 		return { kind: "failed", reason: "boundaries" };
 	}
 
-	// Refuse lossy output when recall was disabled, failed, or changed format.
-	// Readback also prevents a source line resembling a recall hint from being trusted.
+	// Require a valid recall hash before accepting lossy output.
 	const hash = RECALL_HINT.exec(filtered)?.[1];
 	if (!hash) return { kind: "failed", reason: "recovery" };
-	// Without a readback, a hint is trusted only if the original could not have
-	// supplied it. RTK may strip escapes or trim lines, so a hash found anywhere
-	// in the original, even split by control characters, forces the readback.
+	// Force a recall readback when requested or when the original text could contain the hash.
 	if (
 		verifyRecall ||
 		RECALL_HINT.test(text) ||

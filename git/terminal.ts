@@ -7,10 +7,7 @@ export function terminalCaptureArgs(
 	command: string,
 	platform: NodeJS.Platform = process.platform,
 ): string[] {
-	// script gives Git a real terminal on all three descriptors. tee preserves
-	// live output; tail bounds capture without stopping a verbose Git command.
-	// macOS script reports a signal number as its exit code. A waiting shell
-	// normalizes SIGINT to 130 while preserving ordinary exit codes, including 2.
+	// Run Git under script with live terminal output and bounded tail capture.
 	const invocation =
 		platform === "darwin"
 			? `/usr/bin/script -q /dev/null /bin/bash -c 'trap : INT; "$1" -c "$2"; exit $?' pi-git "$1" "$2"`

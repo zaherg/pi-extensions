@@ -1,34 +1,30 @@
 import { stripJsonIndentation } from "./views.ts";
 
-/**
- * Lossless rewrites. Each one proves itself by rebuilding the input exactly
- * from its output and returns `undefined` when it cannot.
- */
-
+// Lossless rewrites that verify exact round-trip reconstruction before returning.
 const MATCH = /^(.+?):(\d+): /;
 const COMPACT = /^ (\d+)([:-]) /;
 
 interface GrepLine {
 	path: string;
-	/** `:12: text` for matches, `-13- text` for context. */
+	/** Match or context suffix such as `:12: text` or `-13- text`. */
 	rest: string;
 }
 
-/** Context lines carry the path of the match block they belong to. */
-function contextLine(line: string, path: string | undefined) {
+/** Attach a grep context line to its surrounding match block path. */
+function contextLine(line: string, path: string | undefined): GrepLine | undefined {
 	if (path === undefined || !line.startsWith(`${path}-`)) return undefined;
 	const rest = line.slice(path.length);
 	return /^-\d+- /.test(rest) ? { path, rest } : undefined;
 }
 
 function parseGrep(lines: readonly string[]): (GrepLine | undefined)[] {
-	const parsed: (GrepLine | undefined)[] = lines.map((line) => {
+	const parsed: (GrepLine | undefined)[] = lines.map((line: string): GrepLine | undefined => {
 		const path = MATCH.exec(line)?.[1];
 		return path === undefined
 			? undefined
 			: { path, rest: line.slice(path.length) };
 	});
-	// Context after a match, then context before one.
+	// Propagate file paths across trailing and leading context lines.
 	let previous: string | undefined;
 	for (let index = 0; index < lines.length; index++) {
 		const line = lines[index] ?? "";
@@ -46,7 +42,7 @@ function parseGrep(lines: readonly string[]): (GrepLine | undefined)[] {
 	return parsed;
 }
 
-/** Inverse of `groupGrep`; also the proof each grouping is checked against. */
+/** Restore full file prefixes to grouped grep lines. */
 export function ungroupGrep(text: string): string {
 	const lines = text.split("\n");
 	const out: string[] = [];
@@ -69,14 +65,11 @@ export function ungroupGrep(text: string): string {
 	return out.join("\n");
 }
 
-/**
- * Groups Pi `grep` lines (`path:12: text`, `path-13- text`) under one
- * heading per consecutive run of a file, as FFF does. Order is unchanged.
- */
+/** Group consecutive grep lines by file path while preserving line order. */
 export function groupGrep(text: string): string | undefined {
 	const lines = text.split("\n");
-	// Already grouped (FFF registered under a native name): ungrouping would be ambiguous.
-	if (lines.some((line) => COMPACT.test(line))) return undefined;
+	// Skip output that already uses grouped line prefixes.
+	if (lines.some((line: string) => COMPACT.test(line))) return undefined;
 	const parsed = parseGrep(lines);
 	const out: string[] = [];
 	let current: string | undefined;
@@ -89,7 +82,7 @@ export function groupGrep(text: string): string | undefined {
 		}
 		if (entry.path !== current) out.push(entry.path);
 		current = entry.path;
-		// `:12: text` becomes ` 12: text`; `-13- text` becomes ` 13- text`.
+		// Convert `:12: text` to ` 12: text` and `-13- text` to ` 13- text`.
 		out.push(` ${entry.rest.slice(1)}`);
 	}
 	const grouped = out.join("\n");
@@ -133,7 +126,7 @@ function bestSuffix(lines: readonly string[]): string | undefined {
 	return best;
 }
 
-/** Inverse of `factorSuffixes`; also the proof each rewrite is checked against. */
+/** Expand factored Markdown suffix footnotes back into each line. */
 export function unfactorSuffixes(text: string): string {
 	const lines = text.split("\n");
 	const notes = new Map<string, string>();
@@ -144,11 +137,11 @@ export function unfactorSuffixes(text: string): string {
 		notes.set(note[1], note[2]);
 		end--;
 	}
-	// The footnote block is separated by one blank line.
+	// Strip the blank line separating the footnote definitions.
 	if (notes.size > 0 && lines[end - 1] === "") end--;
 	return lines
 		.slice(0, end)
-		.map((line) => {
+		.map((line: string): string => {
 			const marker = / \[\^(\d+)\]$/.exec(line);
 			const suffix =
 				marker?.[1] === undefined ? undefined : notes.get(marker[1]);
@@ -159,10 +152,7 @@ export function unfactorSuffixes(text: string): string {
 		.join("\n");
 }
 
-/**
- * Replaces a long tail shared by many lines (diagnostic boilerplate, for
- * example) with a Markdown footnote marker, defined once at the end.
- */
+/** Replace repeated long line suffixes with trailing Markdown footnotes. */
 export function factorSuffixes(text: string): string | undefined {
 	if (text.includes("[^")) return undefined;
 	let lines = text.split("\n");
@@ -170,7 +160,7 @@ export function factorSuffixes(text: string): string | undefined {
 	for (let label = 1; label <= MAX_FOOTNOTES; label++) {
 		const suffix = bestSuffix(lines);
 		if (suffix === undefined) break;
-		lines = lines.map((line) =>
+		lines = lines.map((line: string): string =>
 			line.endsWith(suffix) && line.length > suffix.length
 				? `${line.slice(0, -suffix.length)} [^${label}]`
 				: line,
@@ -182,7 +172,7 @@ export function factorSuffixes(text: string): string | undefined {
 	return unfactorSuffixes(factored) === text ? factored : undefined;
 }
 
-/** Drops indentation from a complete, pretty-printed JSON document. */
+/** Strip leading indentation from a complete, pretty-printed JSON document. */
 export function compactJsonDocument(text: string): string | undefined {
 	const trimmed = text.trim();
 	if (!/^[[{]/.test(trimmed) || !text.includes("\n")) return undefined;

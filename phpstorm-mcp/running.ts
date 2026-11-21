@@ -1,7 +1,7 @@
 import { win32 } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-// Query registered GUI applications, not the leftover stdioMcpServer processes.
+// Query registered GUI applications rather than leftover stdioMcpServer processes.
 const macQuery = `
 ObjC.import("AppKit");
 const apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("com.jetbrains.PhpStorm");
@@ -24,10 +24,12 @@ function queryError(reason: string): Error {
 	return new Error(`Failed to check whether PhpStorm is running: ${reason}; MCP was not registered.`);
 }
 
-// A bare powershell.exe would also match one planted in Pi's working directory,
-// which libuv searches before PATH on Windows.
+// Resolve System32 PowerShell directly so Windows never runs a powershell.exe from cwd.
 export function windowsPowerShell(env: NodeJS.ProcessEnv = process.env): string {
-	const root = [env.SystemRoot, env.windir].find((dir) => dir && /^[A-Za-z]:[\\/]/.test(dir)) ?? "C:\\Windows";
+	const root =
+		[env.SystemRoot, env.windir].find(
+			(dir: string | undefined) => dir !== undefined && /^[A-Za-z]:[\\/]/.test(dir),
+		) ?? "C:\\Windows";
 	return win32.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 }
 
@@ -55,11 +57,11 @@ export async function isPhpStormRunning(
 			throw queryError(`unsupported platform ${platform}`);
 	}
 
-	let result: Awaited<ReturnType<ExtensionAPI["exec"]>>;
+	let result: ExecResult;
 	try {
 		result = await pi.exec(command, args, { timeout: 2000, maxBuffer: 1024 * 1024 });
 	} catch {
-		// Child-process exceptions can contain command output or private process arguments.
+		// Suppress raw child-process errors that could expose private process arguments.
 		throw queryError("could not execute process query");
 	}
 	if (result.code !== 0 || result.killed || result.truncated) {
@@ -67,13 +69,16 @@ export async function isPhpStormRunning(
 	}
 
 	if (platform === "linux") {
-		return result.stdout.split("\n").some((line) => {
+		return result.stdout.split("\n").some((line: string): boolean => {
 			const match = /^\s*(\S+)\s+(.+)$/.exec(line);
-			if (!match) return false;
-			const [, name, args] = match;
-			if (/(?:^|[\s"'])stdioMcpServer(?:$|[\s"'])/i.test(args)) return false;
-			return name === "phpstorm" || name === "phpstorm64" || (
-				name === "java" && /(?:^|\s)-Didea\.platform\.prefix=PhpStorm(?:\s|$)/.test(args)
+			const name = match?.[1];
+			const cmdArgs = match?.[2];
+			if (!name || !cmdArgs) return false;
+			if (/(?:^|[\s"'])stdioMcpServer(?:$|[\s"'])/i.test(cmdArgs)) return false;
+			return (
+				name === "phpstorm" ||
+				name === "phpstorm64" ||
+				(name === "java" && /(?:^|\s)-Didea\.platform\.prefix=PhpStorm(?:\s|$)/.test(cmdArgs))
 			);
 		});
 	}

@@ -46,6 +46,25 @@ export type ProgressResult = {
 	path: string;
 	document: ProgressDocument | null;
 };
+export type ProgressErrorCode =
+	| "INVALID_REQUEST"
+	| "INVALID_DOCUMENT"
+	| "PROJECT_COLLISION"
+	| "INVALID_PROJECT"
+	| "UNSAFE_PATH"
+	| "LOCKED"
+	| "LOCK_CHANGED"
+	| "DURABILITY_UNCERTAIN"
+	| "CONFLICT"
+	| "NOT_FOUND"
+	| "NOT_STARTED"
+	| "MODEL_CONFIG"
+	| "MODEL_UNAVAILABLE"
+	| "CONTEXT_LIMIT"
+	| "TIMEOUT"
+	| "MODEL_FAILED"
+	| "INVALID_PROPOSAL";
+
 interface Location {
 	project: string;
 	root: string;
@@ -85,15 +104,15 @@ type Request =
 	  };
 
 export class ProgressError extends Error {
-	readonly code: string;
-	constructor(code: string, message: string) {
+	readonly code: ProgressErrorCode;
+	constructor(code: ProgressErrorCode, message: string) {
 		super(message);
 		this.name = "ProgressError";
 		this.code = code;
 	}
 }
 
-function fail(code: string, message: string): never {
+function fail(code: ProgressErrorCode, message: string): never {
 	throw new ProgressError(code, message);
 }
 function errno(error: unknown, code: string): boolean {
@@ -101,32 +120,32 @@ function errno(error: unknown, code: string): boolean {
 }
 function object(
 	value: unknown,
-	code: string,
+	code: ProgressErrorCode,
 ): asserts value is Record<string, unknown> {
 	if (value === null || typeof value !== "object" || Array.isArray(value))
 		fail(code, "Expected an object.");
 }
 function fields(
 	value: Record<string, unknown>,
-	required: string[],
-	optional: string[],
-	code: string,
+	required: readonly string[],
+	optional: readonly string[],
+	code: ProgressErrorCode,
 ): void {
 	if (
-		required.some((key) => !Object.hasOwn(value, key)) ||
+		required.some((key: string) => !Object.hasOwn(value, key)) ||
 		Object.keys(value).some(
-			(key) => !required.includes(key) && !optional.includes(key),
+			(key: string) => !required.includes(key) && !optional.includes(key),
 		)
 	) {
 		fail(code, "Unsupported or missing fields.");
 	}
 }
-function text(value: unknown, code: string): string {
+function text(value: unknown, code: ProgressErrorCode): string {
 	if (typeof value !== "string" || !value.trim())
 		fail(code, "Expected nonempty text.");
 	return value;
 }
-function integer(value: unknown, code: string): number {
+function integer(value: unknown, code: ProgressErrorCode): number {
 	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
 		fail(code, "Expected a nonnegative safe integer revision.");
 	return value;
@@ -134,7 +153,7 @@ function integer(value: unknown, code: string): number {
 function state(
 	value: unknown,
 	blockedBy: unknown,
-	code: string,
+	code: ProgressErrorCode,
 ): { status: StepStatus; blocked_by: string | null } {
 	const status =
 		value === null ? null : STATUSES.find((candidate) => candidate === value);
@@ -146,7 +165,7 @@ function state(
 	return { status, blocked_by: null };
 }
 function parseRequest(value: unknown): Request {
-	const code = "INVALID_REQUEST";
+	const code: ProgressErrorCode = "INVALID_REQUEST";
 	object(value, code);
 	if (value.action === "read" || value.action === "start") {
 		fields(value, ["action"], [], code);
@@ -168,7 +187,7 @@ function parseRequest(value: unknown): Request {
 				expected_revision,
 				title: text(value.title, code),
 				description: text(value.description, code),
-				steps: value.steps.map((step) => text(step, code)),
+				steps: value.steps.map((step: unknown) => text(step, code)),
 			};
 		}
 		case "update_task": {
@@ -238,7 +257,7 @@ function parseRequest(value: unknown): Request {
 }
 
 function parseDocument(value: unknown, project: string): ProgressDocument {
-	const code = "INVALID_DOCUMENT";
+	const code: ProgressErrorCode = "INVALID_DOCUMENT";
 	object(value, code);
 	fields(
 		value,
@@ -314,7 +333,7 @@ async function directoryExists(path: string): Promise<boolean> {
 				"Progress storage directories must be real directories, not symlinks.",
 			);
 		return true;
-	} catch (error) {
+	} catch (error: unknown) {
 		if (errno(error, "ENOENT")) return false;
 		throw error;
 	}
@@ -330,7 +349,7 @@ async function syncDirectory(path: string): Promise<void> {
 async function ensureDirectory(path: string): Promise<void> {
 	try {
 		await mkdir(path, { mode: 0o700 });
-	} catch (error) {
+	} catch (error: unknown) {
 		if (!errno(error, "EEXIST")) throw error;
 	}
 	if (!(await directoryExists(path)))
@@ -338,7 +357,7 @@ async function ensureDirectory(path: string): Promise<void> {
 			"UNSAFE_PATH",
 			"Progress storage directory disappeared during initialization.",
 		);
-	// Persist directory entries too, including when another initializer created them.
+	// Sync the parent directory so new directory entries are durable.
 	await syncDirectory(dirname(path));
 }
 async function available(
@@ -366,7 +385,7 @@ async function readDocument(
 			location.path,
 			constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
 		);
-	} catch (error) {
+	} catch (error: unknown) {
 		if (errno(error, "ENOENT")) return null;
 		if (errno(error, "ELOOP"))
 			fail("UNSAFE_PATH", "progress.json must not be a symlink.");
@@ -410,7 +429,7 @@ async function withLock<T>(
 		signal?.throwIfAborted();
 		try {
 			handle = await open(lockPath, "wx", 0o600);
-		} catch (error) {
+		} catch (error: unknown) {
 			if (!errno(error, "EEXIST")) throw error;
 			if (Date.now() >= deadline)
 				fail(
@@ -468,7 +487,7 @@ async function persist(
 		await rename(temporary, location.path);
 		committed = true;
 		await syncDirectory(location.directory);
-	} catch (error) {
+	} catch (error: unknown) {
 		if (committed)
 			fail(
 				"DURABILITY_UNCERTAIN",
@@ -515,7 +534,7 @@ function apply(
 		});
 	} else {
 		const task = document.tasks.find(
-			(candidate) => candidate.id === request.task_id,
+			(candidate: Task) => candidate.id === request.task_id,
 		);
 		if (!task) fail("NOT_FOUND", "Task ID not found.");
 		if (request.action === "update_task") {
@@ -526,7 +545,7 @@ function apply(
 			task.steps.push(newStep(request.description));
 		} else {
 			const step = task.steps.find(
-				(candidate) => candidate.id === request.step_id,
+				(candidate: Step) => candidate.id === request.step_id,
 			);
 			if (!step) fail("NOT_FOUND", "Step ID not found in the selected task.");
 			if (request.description !== undefined)
@@ -537,10 +556,9 @@ function apply(
 	advanceRevision(document);
 }
 
-// Patches cannot delete, reorder, or invent IDs for existing records.
-// Reuse the document validator so CLI and model writes share state invariants.
+// Merge task patches without deleting or reordering records, then revalidate the document.
 function mergeUpdates(document: ProgressDocument, updates: unknown): ProgressDocument {
-	const code = "INVALID_REQUEST";
+	const code: ProgressErrorCode = "INVALID_REQUEST";
 	if (!Array.isArray(updates)) fail(code, "Expected a task updates array.");
 	const tasks = structuredClone(document.tasks);
 	const seen = new Set<string>();
@@ -548,26 +566,34 @@ function mergeUpdates(document: ProgressDocument, updates: unknown): ProgressDoc
 		object(patch, code);
 		fields(patch, ["id", "title", "description", "steps"], [], code);
 		const id = patch.id === null ? `task-${randomUUID()}` : text(patch.id, code);
-		const index = tasks.findIndex((task) => task.id === id);
+		const index = tasks.findIndex((task: Task) => task.id === id);
 		if (patch.id !== null && index === -1) fail(code, "Task ID not found.");
 		if (seen.has(id)) fail(code, "Duplicate task update.");
 		seen.add(id);
 		if (!Array.isArray(patch.steps)) fail(code, "Expected step updates.");
-		const steps: unknown[] = index === -1 ? [] : [...tasks[index].steps];
+		const existingTask = index === -1 ? undefined : tasks[index];
+		const steps: unknown[] = existingTask ? [...existingTask.steps] : [];
 		const seenSteps = new Set<string>();
 		for (const step of patch.steps) {
 			object(step, code);
 			fields(step, ["id", "description", "status", "blocked_by"], [], code);
 			const stepId = step.id === null ? `step-${randomUUID()}` : text(step.id, code);
-			const stepIndex = index === -1 ? -1 : tasks[index].steps.findIndex((item) => item.id === stepId);
-			if (step.id !== null && stepIndex === -1) fail(code, "Step ID not found in the selected task.");
+			const stepIndex = existingTask
+				? existingTask.steps.findIndex((item: Step) => item.id === stepId)
+				: -1;
+			if (step.id !== null && stepIndex === -1)
+				fail(code, "Step ID not found in the selected task.");
 			if (seenSteps.has(stepId)) fail(code, "Duplicate step update.");
 			seenSteps.add(stepId);
 			const replacement = { ...step, id: stepId };
 			if (stepIndex === -1) steps.push(replacement);
 			else steps[stepIndex] = replacement;
 		}
-		const validated = parseDocument({ ...document, tasks: [{ ...patch, id, steps }] }, document.project).tasks[0];
+		const validated = parseDocument(
+			{ ...document, tasks: [{ ...patch, id, steps }] },
+			document.project,
+		).tasks[0];
+		if (!validated) fail(code, "Expected a validated task.");
 		if (index === -1) tasks.push(validated);
 		else tasks[index] = validated;
 	}

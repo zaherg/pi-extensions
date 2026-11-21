@@ -1,11 +1,11 @@
 import { homedir } from "node:os";
 import { basename, isAbsolute, resolve } from "node:path";
 
-/** Pi `read` continuation notice, appended after a blank line. */
+/** Pi read continuation notice appended after a blank line. */
 const READ_NOTICE =
 	/\n\n(\[(?:Showing lines \d+-\d+ of \d+(?: \([^)\n]*\))?|\d+ more lines in file)\. Use offset=\d+ to continue\.\])$/;
 
-/** File lines a `read` result shows, split from Pi's continuation notice. */
+/** File lines shown by a read result, separated from Pi's continuation notice. */
 export interface ReadView {
 	/** 1-based line number of the first body line. */
 	start: number;
@@ -14,11 +14,7 @@ export interface ReadView {
 	notice?: string;
 }
 
-/**
- * `text` is Pi's raw `read` output; `offset` is the call's effective input.
- * Messages Pi returns instead of file lines (such as an oversized first line)
- * have no line view.
- */
+/** Parse raw Pi read output into numbered lines and an optional continuation notice. */
 export function parseReadView(
 	text: string,
 	offset: unknown,
@@ -38,13 +34,10 @@ export function parseReadView(
 	};
 }
 
-/** Pi `bash` truncation notice on successful output, appended after a blank line. */
+/** Pi bash truncation notice on successful output, appended after a blank line. */
 const BASH_TRAILER = /\n\n(\[Showing [^\n]*\. Full output: [^\n]+\])$/;
 
-/**
- * Splits a successful Bash file view into the printed text and Pi's trailing
- * truncation notice, which a condensed view must keep verbatim.
- */
+/** Split Bash file output into body text and any trailing Pi truncation notice. */
 export function splitBashTrailer(text: string): {
 	body: string;
 	trailer?: string;
@@ -54,7 +47,7 @@ export function splitBashTrailer(text: string): {
 	return { body: text.slice(0, match.index), trailer: match[1] };
 }
 
-/** Mirrors Pi's `resolveToCwd` for keys; a mismatch only prevents deduplication. */
+/** Resolve a tool path argument against cwd using Pi's @ and ~ rules. */
 export function resolvePath(path: string, cwd: string): string {
 	let expanded = path.startsWith("@") ? path.slice(1) : path;
 	if (expanded === "~" || expanded.startsWith("~/"))
@@ -78,7 +71,7 @@ const LOCKFILES = new Set([
 	"go.sum",
 ]);
 
-/** Only non-code classes are condensed; everything else stays byte-exact. */
+/** Classify a file path so only non-code formats are condensed. */
 export function fileClass(path: string): FileClass {
 	const name = basename(path);
 	if (LOCKFILES.has(name)) return "lockfile";
@@ -92,7 +85,11 @@ export function fileClass(path: string): FileClass {
 	return "text";
 }
 
-type Extract = (line: string, state: { name?: string }) => string | undefined;
+interface ExtractState {
+	name?: string | undefined;
+}
+
+type Extract = (line: string, state: ExtractState) => string | undefined;
 
 const NPM_KEY = /^\s*"((?:[^"\\]|\\.)+)": \{$/;
 const NPM_VERSION = /^\s*"version": "([^"]+)"/;
@@ -111,7 +108,7 @@ const NOT_PACKAGES = new Set([
 	"workspaces",
 ]);
 
-const npm: Extract = (line, state) => {
+const npm: Extract = (line: string, state: ExtractState): string | undefined => {
 	const key = NPM_KEY.exec(line)?.[1];
 	if (key !== undefined) {
 		const marker = key.lastIndexOf("node_modules/");
@@ -126,8 +123,8 @@ const npm: Extract = (line, state) => {
 	return entry;
 };
 
-/** `name = "x"` followed by `version = "y"` in Cargo, Poetry, and uv lockfiles. */
-const tomlPackages: Extract = (line, state) => {
+/** Extract name and version pairs from Cargo, Poetry, and uv TOML lockfiles. */
+const tomlPackages: Extract = (line: string, state: ExtractState): string | undefined => {
 	const name = /^name = "([^"]+)"$/.exec(line)?.[1];
 	if (name !== undefined) {
 		state.name = name;
@@ -140,7 +137,7 @@ const tomlPackages: Extract = (line, state) => {
 	return entry;
 };
 
-const composer: Extract = (line, state) => {
+const composer: Extract = (line: string, state: ExtractState): string | undefined => {
 	const name = /^\s*"name": "([^"]+)",$/.exec(line)?.[1];
 	if (name !== undefined) {
 		state.name = name;
@@ -153,8 +150,8 @@ const composer: Extract = (line, state) => {
 	return entry;
 };
 
-const yarn: Extract = (line, state) => {
-	// v1 headers start at column 0 and end with ":"; Berry prefixes ranges with a protocol.
+const yarn: Extract = (line: string, state: ExtractState): string | undefined => {
+	// Match both Yarn v1 and Berry package header lines.
 	const header = /^"?((?:@[^@/"\s]+\/)?[^@"\s,]+)@[^\n]*:$/.exec(line)?.[1];
 	if (header !== undefined) {
 		state.name = header;
@@ -167,7 +164,7 @@ const yarn: Extract = (line, state) => {
 	return entry;
 };
 
-const pnpm: Extract = (line) => {
+const pnpm: Extract = (line: string): string | undefined => {
 	const match =
 		/^ {2}\/?'?((?:@[^@/\s']+\/)?[^@\s'/]+)@([^:'\s(]+)(?:\([^\n]*\))?'?:$/.exec(
 			line,
@@ -175,15 +172,15 @@ const pnpm: Extract = (line) => {
 	return match ? `${match[1]}@${match[2]}` : undefined;
 };
 
-const bun: Extract = (line) =>
+const bun: Extract = (line: string): string | undefined =>
 	/^\s+"[^"]+": \["((?:@[^@/"]+\/)?[^@"]+@[^"]+)"/.exec(line)?.[1];
 
-const gemfile: Extract = (line) => {
+const gemfile: Extract = (line: string): string | undefined => {
 	const match = /^ {4}([A-Za-z0-9_.-]+) \(([^)]+)\)$/.exec(line);
 	return match ? `${match[1]}@${match[2]}` : undefined;
 };
 
-const goSum: Extract = (line) => {
+const goSum: Extract = (line: string): string | undefined => {
 	const match = /^(\S+) (v[^/\s]+)(?:\/go\.mod)? h1:/.exec(line);
 	return match ? `${match[1]}@${match[2]}` : undefined;
 };
@@ -204,11 +201,11 @@ const EXTRACTORS: Record<string, Extract> = {
 
 const MIN_PACKAGES = 3;
 
-/** Unique `name@version` entries visible in a lockfile excerpt, in order. */
+/** Extract unique ordered name@version entries visible in a lockfile excerpt. */
 export function lockfilePackages(path: string, text: string): string[] {
 	const extract = EXTRACTORS[basename(path)];
 	if (!extract) return [];
-	const state: { name?: string } = {};
+	const state: ExtractState = {};
 	const seen = new Set<string>();
 	for (const line of text.split("\n")) {
 		const entry = extract(line, state);
@@ -219,11 +216,11 @@ export function lockfilePackages(path: string, text: string): string[] {
 
 const LONG_LINE = 300;
 
-/** Keeps the first 300 characters of each longer line, with an explicit marker. */
+/** Keep the first 300 characters of each long line with an explicit truncation marker. */
 export function truncateLongLines(text: string): string {
 	return text
 		.split("\n")
-		.map((line) =>
+		.map((line: string) =>
 			line.length > LONG_LINE
 				? `${line.slice(0, LONG_LINE)}…[+${line.length - LONG_LINE} chars]`
 				: line,
@@ -231,10 +228,7 @@ export function truncateLongLines(text: string): string {
 		.join("\n");
 }
 
-/**
- * JSON strings cannot contain raw newlines, so leading whitespace on a line
- * is always insignificant, even in an excerpt that is not a whole document.
- */
+/** Strip leading line indentation safely from JSON text or excerpts. */
 export function stripJsonIndentation(text: string): string {
 	return text.replace(/^[ \t]+/gm, "");
 }
@@ -247,16 +241,13 @@ const VIEW_COMMANDS = [
 	String.raw`sed\s+-n\s+['"]?\d+(?:,\d+)?p['"]?\s+${PATH_TOKEN}`,
 	String.raw`(?:head|tail)(?:\s+-n\s*\d+|\s+-\d+)?\s+${PATH_TOKEN}`,
 	String.raw`nl(?:\s+-[A-Za-z0-9]+)*\s+${PATH_TOKEN}`,
-].map((view) => new RegExp(`${CD_PREFIX}${view}\\s*$`));
+].map((view: string) => new RegExp(`${CD_PREFIX}${view}\\s*$`));
 
 function unquote(token: string): string {
 	return /^(['"]).*\1$/.test(token) ? token.slice(1, -1) : token;
 }
 
-/**
- * The file a Bash command only prints, such as `cat a.ts` or
- * `cd app && sed -n '1,80p' a.ts`; pipelines and other shapes are not views.
- */
+/** Return the resolved file path when a Bash command only prints a single file. */
 export function bashFileView(command: string, cwd: string): string | undefined {
 	const trimmed = command.trim();
 	for (const pattern of VIEW_COMMANDS) {

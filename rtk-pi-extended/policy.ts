@@ -1,23 +1,28 @@
 import { Buffer } from "node:buffer";
 import {
+	isBashToolResult,
+	isReadToolResult,
+	type ToolResultEvent,
+} from "@earendil-works/pi-coding-agent";
+import {
 	preservesBoundaries,
 	RECALL_HINT,
 	type StructureCheck,
 } from "./bridge.ts";
 import { bashFileView, resolvePath } from "./views.ts";
 
-/** How a result is handled; also the unit of the coverage report. */
+/** Filtering category assigned to a tool result. */
 export type Category = "read" | "terminal" | "listing" | "generic";
 
 /** Bundled RTK profile directories under `rtk/`. */
 export type Pipeline = "terminal" | "listing" | "generic";
 
-/** RTK's posthook `min_size` guard in `rtk:default`; smaller results are never worth a change. */
+/** Minimum UTF-8 byte size before a tool result is considered for filtering. */
 export const MIN_BYTES = 512;
 
-// `edit` and `write` results are short confirmations.
+// Skip edit and write tools because their results are short confirmations.
 const EXCLUDED = new Set(["edit", "write"]);
-// Pi's native search tools, plus FFF's names in both registration modes.
+// Match Pi's built-in search tools and FFF's tool names in both registration modes.
 const LISTING = new Set([
 	"grep",
 	"find",
@@ -27,51 +32,38 @@ const LISTING = new Set([
 	"fff-multi-grep",
 	"multi_grep",
 ]);
-// RTK's posthook `is_rtk_command` pattern.
+// Match commands invoking rtk directly.
 export const RTK_IN_COMMAND = /(?:^|[|&;(\s])rtk\s/;
-// Recall output must reach the model exactly as stored.
+// Leave rtk recall output untouched so stored originals reach the model verbatim.
 const RTK_RECALL = /(?:^|[|&;(\s])rtk\s+recall\b/;
-// FFF binds ` 12: text` match lines to the preceding file heading.
+// Match numbered FFF output lines bound to a preceding file heading.
 const NUMBERED_LINE = /^ \d+[:-] /;
-// Pi bash and MCP notices that point at the saved full output.
+// Match Pi bash and MCP notices pointing to saved full output files.
 const FULL_OUTPUT_NOTICE = /^\[.*Full output: .*\]$/;
-// CSI, OSC, and two-byte escape sequences, as removed by RTK's `ansi` method.
+// Match CSI, OSC, and two-byte terminal escape sequences removed by RTK's ansi method.
 const ANSI_ESCAPE =
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escapes are the match target.
 	/\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g;
-// RTK `dedup` emits `[xN]` (N >= 3) on the line after a collapsed run of identical lines.
+// Match `[xN]` markers emitted by RTK's dedup method after collapsed identical lines.
 const DEDUP_COUNT = /^\[x(\d+)\]$/;
 const MIN_DEDUP_RUN = 3;
-// RTK `cap` truncates lines over 2,000 characters with a trailing ` [+N chars]` suffix.
+// Match lines over 2,000 characters truncated by RTK's cap method.
 const LONG_LINE_CAP = /^([\s\S]*) \[\+(\d+) chars\]$/;
-// RTK `base64-elide` replaces standard base64 runs (>= 1,024 chars); adjacent padded runs touch.
+// Match one or more adjacent base64 elision markers emitted by RTK.
 const BASE64_ELIDED = /(?:\[base64 data, [^\]]+ elided\])+/g;
 const BASE64_MARKER_PREFIX = "[base64 data, ";
 const MIN_BASE64_RUN = 1_024;
 
-/** The subset of Pi's `tool_result` event that routing depends on. */
-export interface Candidate {
-	toolName: string;
-	input: Record<string, unknown>;
-	content: readonly { type: string; text?: string }[];
-	isError: boolean;
-	parentToolCallId?: string;
-}
-
 export interface Route {
 	category: Category;
 	text: string;
-	/** Absolute path of a file read or a Bash command that only prints one file. */
+	/** Absolute path of a file read or a single-file Bash print command. */
 	path?: string;
-	/**
-	 * The command went through an RTK wrapper. RTK's filters strip terminal
-	 * escapes, so escapes or carriage returns mean the wrapper passed raw
-	 * output through; anything else is left alone to avoid double filtering.
-	 */
+	/** True when the Bash command invoked rtk directly so clean output is not filtered twice. */
 	wrapped?: boolean;
 }
 
-/** Category for a tool's results, or `undefined` when this extension never changes them. */
+/** Return the filtering category for a tool name, or undefined when excluded. */
 export function categoryFor(toolName: string): Category | undefined {
 	if (EXCLUDED.has(toolName)) return undefined;
 	if (toolName === "read") return "read";
@@ -83,39 +75,39 @@ export function hasRawTerminalOutput(text: string): boolean {
 	return text.includes("\u001b") || text.includes("\r");
 }
 
-/** Route a result this extension may change, or return nothing. */
-export function select(candidate: Candidate, cwd: string): Route | undefined {
-	const { toolName, input } = candidate;
-	const category = categoryFor(toolName);
-	// Nested calls (for example from codemode scripts) feed programs, not the model.
-	if (category === undefined || candidate.parentToolCallId !== undefined)
-		return;
-	if (candidate.content.length !== 1) return;
-	const block = candidate.content[0];
-	if (block?.type !== "text" || typeof block.text !== "string") return;
+/** Route a Pi tool_result event for filtering, or return undefined when skipped. */
+export function select(event: ToolResultEvent, cwd: string): Route | undefined {
+	const category = categoryFor(event.toolName);
+	// Ignore nested tool calls because they feed caller scripts rather than the model.
+	if (category === undefined || event.parentToolCallId !== undefined)
+		return undefined;
+	if (event.content.length !== 1) return undefined;
+	const block = event.content[0];
+	if (block?.type !== "text" || typeof block.text !== "string") return undefined;
 	const text = block.text;
-	if (Buffer.byteLength(text) < MIN_BYTES) return;
+	if (Buffer.byteLength(text) < MIN_BYTES) return undefined;
 
-	if (category === "terminal") {
-		const command = input.command;
-		if (typeof command !== "string" || RTK_RECALL.test(command)) return;
-		const path = candidate.isError ? undefined : bashFileView(command, cwd);
+	if (isBashToolResult(event)) {
+		const command = event.input.command;
+		if (typeof command !== "string" || RTK_RECALL.test(command)) return undefined;
+		const path = event.isError ? undefined : bashFileView(command, cwd);
 		if (path !== undefined) return { category: "read", text, path };
-		// Failed commands are included: `cap` keeps their tail.
+		// Include failed commands because cap preserves their trailing lines.
 		return RTK_IN_COMMAND.test(command)
-			? { category, text, wrapped: true }
-			: { category, text };
+			? { category: "terminal", text, wrapped: true }
+			: { category: "terminal", text };
 	}
-	if (candidate.isError) return;
-	if (category === "read") {
-		return typeof input.path === "string"
-			? { category, text, path: resolvePath(input.path, cwd) }
+	if (event.isError) return undefined;
+	if (isReadToolResult(event)) {
+		return typeof event.input.path === "string"
+			? { category: "read", text, path: resolvePath(event.input.path, cwd) }
 			: undefined;
 	}
+	if (category === "read" || category === "terminal") return undefined;
 	return { category, text };
 }
 
-/** Name RTK sees; never a Claude Code tool name or an `mcp__` prefix. */
+/** Prefix tool names for RTK so they match only generic post-tool rules. */
 export function rtkToolName(toolName: string): string {
 	return `pi-${toolName}`;
 }
@@ -134,15 +126,15 @@ function lastNonEmptyLines(text: string, limit: number): string[] {
 	return found;
 }
 
-/** Normalize a line the way `ansi` and `progress` legitimately rewrite it. */
+/** Normalize a line using the same ANSI and carriage-return rules as RTK. */
 function rendered(line: string | undefined): string | undefined {
 	if (line === undefined) return undefined;
 	const visible = line.replace(ANSI_ESCAPE, "");
 	if (!visible.includes("\r")) return visible;
-	return visible.split("\r").findLast((segment) => segment !== "") ?? "";
+	return visible.split("\r").findLast((segment: string) => segment !== "") ?? "";
 }
 
-/** Count consecutive lines at the end of `text` (ignoring trailing blanks) matching its final line. */
+/** Count trailing consecutive lines matching the final non-empty line. */
 function trailingRepeatCount(text: string): number {
 	const lines = text.split("\n");
 	let index = lines.length - 1;
@@ -159,16 +151,16 @@ function trailingRepeatCount(text: string): number {
 
 function isBase64Code(code: number): boolean {
 	return (
-		(code >= 65 && code <= 90) || // A-Z
-		(code >= 97 && code <= 122) || // a-z
-		(code >= 48 && code <= 57) || // 0-9
-		code === 43 || // +
-		code === 47 || // /
-		code === 61 // =
+		(code >= 65 && code <= 90) ||
+		(code >= 97 && code <= 122) ||
+		(code >= 48 && code <= 57) ||
+		code === 43 ||
+		code === 47 ||
+		code === 61
 	);
 }
 
-/** If `cap` cut mid-way through a trailing `[base64 data, ... elided]` marker, complete it for matching. */
+/** Complete a trailing base64 elision marker when cap truncated inside it. */
 function withCompleteTrailingBase64Marker(prefix: string): string | undefined {
 	const open = prefix.lastIndexOf("[");
 	if (open < 0 || prefix.indexOf("]", open) >= 0) return undefined;
@@ -182,10 +174,7 @@ function withCompleteTrailingBase64Marker(prefix: string): string | undefined {
 	return undefined;
 }
 
-/**
- * Verify `filtered` equals `original` (or a capped prefix when `prefixOnly` is
- * true) with each marker group replacing a standard base64 run of >= 1,024 chars.
- */
+/** Check that base64 elision markers replace valid base64 runs of at least 1,024 characters. */
 function matchesBase64Elided(
 	original: string,
 	filtered: string,
@@ -229,7 +218,7 @@ function matchesBase64Elided(
 	return false;
 }
 
-/** Check that RTK kept the final line, allowing `ansi`, `progress`, `base64-elide`, and long-line `cap`. */
+/** Check that RTK preserved the final line modulo allowed terminal and cap rewrites. */
 function matchesLastLine(
 	original: string | undefined,
 	filtered: string | undefined,
@@ -251,7 +240,7 @@ function matchesLastLine(
 		) {
 			return true;
 		}
-		// `base64-elide` can run before `cap` on the same line (including cutting inside the marker).
+		// Handle lines where base64-elide ran before cap, including mid-marker cuts.
 		if (omitted > 0) {
 			if (matchesBase64Elided(origVis, prefix, true)) return true;
 			const completed = withCompleteTrailingBase64Marker(prefix);
@@ -265,11 +254,7 @@ function matchesLastLine(
 	return false;
 }
 
-/**
- * Status lines and Pi notices end the output and point at the saved full
- * output, so both must survive filtering unchanged (allowing RTK's `ansi`,
- * `progress`, `dedup`, `base64-elide`, and long-line `cap` rewrites).
- */
+/** Verify that the final status line and all full-output notices survived filtering. */
 export function preservesTrailer(original: string, filtered: string): boolean {
 	const body = filtered.replace(RECALL_HINT, "");
 	const [origLast] = lastNonEmptyLines(original, 1);
@@ -284,23 +269,23 @@ export function preservesTrailer(original: string, filtered: string): boolean {
 	const kept = new Set(body.split("\n"));
 	return original
 		.split("\n")
-		.every((line) => !FULL_OUTPUT_NOTICE.test(line) || kept.has(line));
+		.every((line: string) => !FULL_OUTPUT_NOTICE.test(line) || kept.has(line));
 }
 
 export function structureCheck(pipeline: Pipeline): StructureCheck {
 	if (pipeline !== "listing") return preservesTrailer;
-	return (original, filtered) =>
+	return (original: string, filtered: string): boolean =>
 		preservesTrailer(original, filtered) &&
-		// FFF output in override mode reaches this profile under native names.
-		(!original.split("\n").some((line) => NUMBERED_LINE.test(line)) ||
+		// Check FFF group boundaries when override-mode output uses native tool names.
+		(!original.split("\n").some((line: string) => NUMBERED_LINE.test(line)) ||
 			preservesBoundaries(original, filtered));
 }
 
-// A replacement must save at least this much to be worth a lossy or reformatted view.
+// Require a minimum absolute and relative byte reduction before replacing output.
 export const MIN_SAVED_BYTES = 128;
 export const MIN_SAVED_RATIO = 0.1;
 
-/** Never-worse plus a minimum gain: small or negative savings keep the original. */
+/** Require replacements to save both minimum bytes and a minimum fraction of the original. */
 export function worthReplacing(original: string, replacement: string): boolean {
 	const before = Buffer.byteLength(original);
 	const saved = before - Buffer.byteLength(replacement);

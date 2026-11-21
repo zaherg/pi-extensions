@@ -1,8 +1,21 @@
-import type { ExecResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+	AgentSettledEvent,
+	ExecResult,
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+	ExtensionUIContext,
+	SessionShutdownEvent,
+	SessionStartEvent,
+	TurnEndEvent,
+} from "@earendil-works/pi-coding-agent";
 import { resolveExecutable } from "../shared/executable.ts";
 
 const counters = ["total_commands", "total_input", "total_output", "total_saved"] as const;
-type Gain = Record<(typeof counters)[number], number>;
+type CounterKey = (typeof counters)[number];
+type Gain = Record<CounterKey, number>;
+type NotifyLevel = NonNullable<Parameters<ExtensionUIContext["notify"]>[1]>;
+
 const gainArgs = ["gain", "--format", "json"];
 const compact = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
 const exact = new Intl.NumberFormat("en");
@@ -12,48 +25,62 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 
 function validGain(value: unknown): value is Gain {
-	return record(value) && counters.every((key) => {
-		const n = value[key];
-		return typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
-	});
+	return (
+		record(value) &&
+		counters.every((key: CounterKey) => {
+			const n = value[key];
+			return typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
+		})
+	);
 }
 
-function summary(value: unknown) {
-	if (record(value) && validGain(value.summary) && value.summary.total_saved <= value.summary.total_input) return value.summary;
+function summary(value: unknown): Gain | undefined {
+	if (record(value) && validGain(value.summary) && value.summary.total_saved <= value.summary.total_input) {
+		return value.summary;
+	}
+	return undefined;
 }
 
-function sandboxes(value: unknown) {
+function sandboxes(value: unknown): Map<string, string> | undefined {
 	if (value === null) return new Map<string, string>();
-	if (!Array.isArray(value)) return;
+	if (!Array.isArray(value)) return undefined;
 	const names = new Map<string, string>();
 	for (const box of value) {
-		if (!record(box) || typeof box.name !== "string" || !/^[a-z\d][a-z\d.-]{0,62}$/i.test(box.name)
-			|| typeof box.status !== "string" || !box.status || names.has(box.name)) return;
+		if (
+			!record(box) ||
+			typeof box.name !== "string" ||
+			!/^[a-z\d][a-z\d.-]{0,62}$/i.test(box.name) ||
+			typeof box.status !== "string" ||
+			!box.status ||
+			names.has(box.name)
+		) {
+			return undefined;
+		}
 		names.set(box.name, box.status);
 	}
 	return names;
 }
 
-function plural(count: number, word: string) {
+function plural(count: number, word: string): string {
 	return `${word}${count === 1 ? "" : "s"}`;
 }
 
-function savings(gain: Gain, format = exact) {
+function savings(gain: Gain, format: Intl.NumberFormat = exact): string {
 	const percent = gain.total_input ? (gain.total_saved / gain.total_input) * 100 : 0;
 	return `${format.format(gain.total_saved)} ${plural(gain.total_saved, "token")} saved (${percent.toFixed(1)}%)`;
 }
 
-function detail(name: string, gain: Gain) {
+function detail(name: string, gain: Gain): string {
 	return `${name}: ${savings(gain)}\n  ${exact.format(gain.total_commands)} ${plural(gain.total_commands, "command")} | ${exact.format(gain.total_input)} tokens before / ${exact.format(gain.total_output)} after`;
 }
 
-function guestExit(code: number) {
+function guestExit(code: number): string {
 	if (code === 127) return "rtk not found in sandbox";
 	if (code === 125) return "sbx could not run rtk";
 	return `rtk exited with code ${code}`;
 }
 
-function formatAll(rows: [string, Gain | string][], noSandboxes: boolean): [string, "info" | "warning" | "error"] {
+function formatAll(rows: [string, Gain | string][], noSandboxes: boolean): [string, NotifyLevel] {
 	const total: Gain = { total_commands: 0, total_input: 0, total_output: 0, total_saved: 0 };
 	const lines: string[] = [];
 	let reported = 0;
@@ -68,12 +95,16 @@ function formatAll(rows: [string, Gain | string][], noSandboxes: boolean): [stri
 	if (noSandboxes) lines.push("Sandboxes: none");
 	if (!reported) return [["No RTK gains available.", ...lines].join("\n"), "error"];
 	if (noSandboxes) return [lines.join("\n"), "info"];
-	if (!validGain(total)) return [["Total unavailable: counters exceed safe integer range.", ...lines].join("\n"), "warning"];
+	if (!validGain(total))
+		return [["Total unavailable: counters exceed safe integer range.", ...lines].join("\n"), "warning"];
 	const complete = reported === rows.length;
-	return [[detail(complete ? "Total" : "Total (reported only)", total), ...lines].join("\n"), complete ? "info" : "warning"];
+	return [
+		[detail(complete ? "Total" : "Total (reported only)", total), ...lines].join("\n"),
+		complete ? "info" : "warning",
+	];
 }
 
-export default function rtkGain(pi: ExtensionAPI) {
+export default function rtkGain(pi: ExtensionAPI): void {
 	const lifetime = new AbortController();
 	const { signal } = lifetime;
 
@@ -84,7 +115,7 @@ export default function rtkGain(pi: ExtensionAPI) {
 		parse: (json: unknown) => T | undefined,
 		onExit?: (code: number) => string,
 	): Promise<T | string> {
-		// On Windows a bare name would also match an executable planted in the project.
+		// Resolve bare executables from PATH so Windows never runs binaries from cwd.
 		const executable = resolveExecutable(command);
 		if (!executable) return `${command} not found`;
 		let result: ExecResult;
@@ -113,7 +144,7 @@ export default function rtkGain(pi: ExtensionAPI) {
 
 	function readLocal(ctx: ExtensionContext): Promise<Gain | string> {
 		const { cwd } = ctx;
-		const next = query(cwd, "rtk", gainArgs, summary).then((gain) => {
+		const next = query(cwd, "rtk", gainArgs, summary).then((gain: Gain | string): Gain | string => {
 			try {
 				if (!signal.aborted && ctx.hasUI) {
 					ctx.ui.setStatus("rtk-gain", typeof gain === "string" ? undefined : `RTK: ${savings(gain, compact)}`);
@@ -130,25 +161,26 @@ export default function rtkGain(pi: ExtensionAPI) {
 		return next;
 	}
 
-	function refresh(ctx: ExtensionContext) {
+	function refresh(ctx: ExtensionContext): void {
 		if (signal.aborted || !ctx.hasUI) return;
 		if (pending) queued = ctx;
 		else void readLocal(ctx);
 	}
 
 	async function freshLocal(ctx: ExtensionContext): Promise<Gain | string> {
-		// Wait for any in-flight background read so commands never return a pre-command snapshot.
+		// Wait for any in-flight background read so commands never return stale data.
 		queued = undefined;
 		while (pending) await pending;
 		return signal.aborted ? "rtk was interrupted or timed out" : readLocal(ctx);
 	}
 
-	pi.on("session_start", (_event, ctx) => refresh(ctx));
-	pi.on("turn_end", (event, ctx) => {
+	pi.on("session_start", (_event: SessionStartEvent, ctx: ExtensionContext): void => refresh(ctx));
+	pi.on("turn_end", (event: TurnEndEvent, ctx: ExtensionContext): undefined => {
 		if (event.toolResults.length > 0) refresh(ctx);
+		return undefined;
 	});
-	pi.on("agent_settled", (_event, ctx) => refresh(ctx));
-	pi.on("session_shutdown", async (_event, ctx) => {
+	pi.on("agent_settled", (_event: AgentSettledEvent, ctx: ExtensionContext): void => refresh(ctx));
+	pi.on("session_shutdown", async (_event: SessionShutdownEvent, ctx: ExtensionContext): Promise<void> => {
 		lifetime.abort();
 		queued = undefined;
 		if (ctx.hasUI) ctx.ui.setStatus("rtk-gain", undefined);
@@ -157,20 +189,26 @@ export default function rtkGain(pi: ExtensionAPI) {
 
 	pi.registerCommand("rtk-gain", {
 		description: "Show RTK token savings here, or across the host and running Docker sandboxes: /rtk-gain [all]",
-		handler: async (args, ctx) => {
+		handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
 			const { cwd } = ctx;
-			const show = (text: string, level: "info" | "warning" | "error") => {
+			const show = (text: string, level: NotifyLevel): void => {
 				if (signal.aborted) return;
 				if (ctx.hasUI) ctx.ui.notify(text, level);
 				else process.stderr.write(`${text}\n`);
 			};
 			const scope = args.trim();
-			if (scope && scope !== "all") return show("Usage: /rtk-gain [all]", "error");
+			if (scope && scope !== "all") {
+				show("Usage: /rtk-gain [all]", "error");
+				return;
+			}
 			const here = await freshLocal(ctx);
 			if (!scope) {
-				return typeof here === "string"
-					? show(`Local RTK gain unavailable: ${here}. Check rtk gain --format json.`, "error")
-					: show(detail("Local RTK gain", here), "info");
+				if (typeof here === "string") {
+					show(`Local RTK gain unavailable: ${here}. Check rtk gain --format json.`, "error");
+				} else {
+					show(detail("Local RTK gain", here), "info");
+				}
+				return;
 			}
 			if (signal.aborted) return;
 			const rows: [string, Gain | string][] = [["Local", here]];
@@ -179,12 +217,25 @@ export default function rtkGain(pi: ExtensionAPI) {
 			if (typeof boxes === "string") {
 				rows.push(["Sandboxes", `${boxes}; check sbx ls --json on the host`]);
 			} else if (boxes.size > 0) {
-				rows.push(...await Promise.all([...boxes].map(async ([name, status]): Promise<[string, Gain | string]> => {
-					const label = `Sandbox ${name}`;
-					if (status !== "running") return [label, status === "stopped" ? "stopped" : "not running"];
-					// shortcut: sbx exec can start a guest stopped since listing, use a no-start exec flag if sbx adds one.
-					return [label, await query(cwd, "sbx", ["--no-input", "exec", "--", name, "rtk", ...gainArgs], summary, guestExit)];
-				})));
+				rows.push(
+					...(await Promise.all(
+						[...boxes].map(async ([name, status]: [string, string]): Promise<[string, Gain | string]> => {
+							const label = `Sandbox ${name}`;
+							if (status !== "running") return [label, status === "stopped" ? "stopped" : "not running"];
+							// Skip stopped sandboxes because sbx exec can start guests lacking a no-start flag.
+							return [
+								label,
+								await query(
+									cwd,
+									"sbx",
+									["--no-input", "exec", "--", name, "rtk", ...gainArgs],
+									summary,
+									guestExit,
+								),
+							];
+						}),
+					)),
+				);
 			}
 
 			const [text, level] = formatAll(rows, boxes instanceof Map && boxes.size === 0);

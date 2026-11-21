@@ -1,7 +1,6 @@
 import { stripVTControlCharacters } from "node:util";
 
-// Heuristic protection for common credentials, not an arbitrary-secret detector.
-// Shared by display output and text sent to models, so both redact the same forms.
+// Redact common credential patterns in display and model-facing text.
 export function redactSecrets(text: string): string {
 	return text
 		.replace(
@@ -28,12 +27,12 @@ export function redactSecrets(text: string): string {
 		.replace(/(https?:\/\/)[^\s/@]+@/gi, "$1[REDACTED]@");
 }
 
-// Display-only cleanup: terminal controls removed, then credentials redacted.
+// Strip terminal control characters and redact credentials for display.
 function clean(text: string): string {
 	return redactSecrets(
 		stripVTControlCharacters(text)
 			.replace(/\r\n?/g, "\n")
-			.replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
+			.replace(/[\p{Cc}\p{Cf}]/gu, (character: string): string =>
 				character === "\n" || character === "\t" ? character : "",
 			),
 	)
@@ -51,7 +50,7 @@ const trimTrailHigh = (s: string): string => {
 };
 
 export function displayLabel(text: string, limit: number): string {
-	// A word cut at the bound can lack the suffix identifying a credential.
+	// Drop a trailing partial word that might lack a credential's identifying suffix.
 	const head =
 		text.length > 1024 ? text.slice(0, 1024).replace(/\S+$/u, "") : text;
 	const label = clean(head).replace(/\s+/gu, " ").trim();
@@ -65,7 +64,7 @@ export function displayLabel(text: string, limit: number): string {
 
 export function displayTail(text: string, cut: boolean, empty: string): string {
 	if (cut) {
-		// A partial first line can lack the prefix identifying a credential.
+		// Drop a partial first line that might lack a credential's identifying prefix.
 		const newline = text.indexOf("\n");
 		text = newline < 0 ? "" : text.slice(newline + 1);
 	}

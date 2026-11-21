@@ -1,13 +1,19 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionUIContext,
+} from "@earendil-works/pi-coding-agent";
 import { resolveExecutable } from "./shared/executable.ts";
 
-export default function (pi: ExtensionAPI) {
+type NotifyLevel = NonNullable<Parameters<ExtensionUIContext["notify"]>[1]>;
+
+export default function wipExtension(pi: ExtensionAPI): void {
 	let running = false;
 
 	pi.registerCommand("wip", {
 		description: 'Run git add . && git commit -m "wip"',
-		handler: async (args, ctx) => {
-			const notify = (message: string, type: "info" | "warning" | "error") => {
+		handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
+			const notify = (message: string, type: NotifyLevel): void => {
 				if (ctx.hasUI) ctx.ui.notify(message, type);
 			};
 			if (args.trim()) {
@@ -29,14 +35,15 @@ export default function (pi: ExtensionAPI) {
 			running = true;
 			let command = "git add .";
 			try {
-				for (const gitArgs of [
+				const commands: string[][] = [
 					["add", "."],
 					["commit", "-m", "wip"],
-				]) {
+				];
+				for (const gitArgs of commands) {
 					command = `git ${gitArgs.join(" ")}`;
 					const result = await pi.exec(git, gitArgs, { cwd: ctx.cwd });
 					if (result.code !== 0 || result.killed) {
-						// Hooks can print secrets, so report status without forwarding output.
+						// Report status without forwarding hook output that could contain secrets.
 						notify(
 							result.killed
 								? `${command} was interrupted. Check git status before retrying.`

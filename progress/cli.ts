@@ -17,7 +17,7 @@ async function main(): Promise<void> {
 	const chunks: Buffer[] = [];
 	let length = 0;
 	for await (const chunk of process.stdin) {
-		const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+		const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
 		length += bytes.length;
 		if (length > MAX_BYTES)
 			throw new ProgressError(
@@ -41,7 +41,7 @@ async function main(): Promise<void> {
 	process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
-main().catch((error) => {
+main().catch((error: unknown): void => {
 	process.stderr.write(`${JSON.stringify(errorResult(error))}\n`);
 	process.exitCode = 1;
 });

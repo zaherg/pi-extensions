@@ -4,9 +4,6 @@
     "private": true,
     "description": "Register PhpStorm MCP only in Pi RPC sessions.",
     "type": "module",
-    "scripts": {
-        "test": "node --test tests/*.test.ts"
-    },
     "engines": {
         "node": ">=22.19.0"
     },

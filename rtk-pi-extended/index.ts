@@ -1,10 +1,20 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type {
-	ExtensionAPI,
-	ExtensionContext,
+import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import {
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	type ExtensionContext,
+	type ExtensionUIContext,
+	isEditToolResult,
+	isWriteToolResult,
+	type ToolResultEvent,
+	type ToolResultEventResult,
+	type TurnEndEvent,
+	type TurnEndEventResult,
 } from "@earendil-works/pi-coding-agent";
-import { type Failure, filterPosthook } from "./bridge.ts";
+import { resolveExecutable } from "../shared/executable.ts";
+import { type Failure, filterPosthook, type Result } from "./bridge.ts";
 import {
 	classifyBash,
 	formatReport,
@@ -16,10 +26,9 @@ import {
 import { type ContextResults, PassageIndex, ReadIndex } from "./dedup.ts";
 import { createGate } from "./gate.ts";
 import { ENTRY_TYPE, Ledger } from "./outcomes.ts";
-import { rtkToolName, select, structureCheck } from "./policy.ts";
+import { type Pipeline, rtkToolName, select, structureCheck } from "./policy.ts";
 import { type Dependencies, type Processed, processRoute } from "./process.ts";
 import { resolvePath } from "./views.ts";
-import { resolveExecutable } from "../shared/executable.ts";
 
 const REWRITE_TIMEOUT_MS = 2_000;
 
@@ -37,23 +46,22 @@ const FAILURE_MESSAGES: Record<Failure, string> = {
 	unexpected: "an unexpected adapter error occurred",
 };
 
-type Level = "info" | "warning" | "error";
+type NotifyLevel = NonNullable<Parameters<ExtensionUIContext["notify"]>[1]>;
 
-function show(ctx: ExtensionContext, message: string, level: Level): void {
+function show(ctx: ExtensionContext, message: string, level: NotifyLevel): void {
 	if (ctx.hasUI) ctx.ui.notify(message, level);
-	// stdout can carry a JSON or RPC protocol; keep diagnostics off it.
+	// Write diagnostics to stderr so JSON or RPC stdout streams stay clean.
 	else process.stderr.write(`${message}\n`);
 }
 
-function textOf(content: readonly { type: string; text?: string }[]): string {
+function textOf(content: readonly (TextContent | ImageContent)[]): string {
 	return content
-		.flatMap((block) =>
-			block.type === "text" && block.text !== undefined ? [block.text] : [],
-		)
+		.filter((block): block is TextContent => block.type === "text")
+		.map((block: TextContent) => block.text)
 		.join("\n");
 }
 
-export default function rtkPiExtended(pi: ExtensionAPI) {
+export default function rtkPiExtended(pi: ExtensionAPI): void {
 	const pipelines = join(dirname(fileURLToPath(import.meta.url)), "rtk");
 	const lifetime = new AbortController();
 	const pending = new Set<Promise<Processed | undefined>>();
@@ -62,13 +70,13 @@ export default function rtkPiExtended(pi: ExtensionAPI) {
 	const reads = new ReadIndex();
 	const passages = new PassageIndex();
 	const gate = createGate(pipelines);
-	// One readback per session proves recall works here; RTK only emits a hint after storing.
+	// Verify recall once per session since RTK only emits a hint after storing.
 	let recallVerified = false;
 	let contextCache:
 		| { leaf: string | null; results: Map<string, string> }
 		| undefined;
 
-	const warn = (reason: Failure, ctx: ExtensionContext) => {
+	const warn = (reason: Failure, ctx: ExtensionContext): void => {
 		if (reason === "aborted" || reported.has(reason)) return;
 		reported.add(reason);
 		show(
@@ -78,7 +86,7 @@ export default function rtkPiExtended(pi: ExtensionAPI) {
 		);
 	};
 
-	/** Model-visible tool results, rebuilt only when the session leaf moves. */
+	/** Return model-visible tool results, rebuilding only when the session leaf moves. */
 	const contextOf = (ctx: ExtensionContext) => (): ContextResults => {
 		const leaf = ctx.sessionManager.getLeafId();
 		if (contextCache?.leaf === leaf) return contextCache.results;
@@ -92,87 +100,92 @@ export default function rtkPiExtended(pi: ExtensionAPI) {
 		return results;
 	};
 
-	const forget = () => {
+	const forget = (): void => {
 		reads.clear();
 		passages.clear();
 		contextCache = undefined;
 	};
-	// Context verification already ignores dropped results; this only frees memory.
+	// Clear cached indexes on compaction or branch switches to free memory.
 	pi.on("session_compact", forget);
 	pi.on("session_tree", forget);
 
-	pi.on("tool_result", async (event, ctx) => {
-		if (
-			process.env.RTK_DISABLED === "1" ||
-			lifetime.signal.aborted ||
-			ctx.signal?.aborted
-		)
-			return;
-		const { toolName, input } = event;
-		if (
-			(toolName === "edit" || toolName === "write") &&
-			!event.isError &&
-			typeof input.path === "string"
-		)
-			reads.invalidate(resolvePath(input.path, ctx.cwd));
-		const route = select(event, ctx.cwd);
-		const block = event.content[0];
-		if (!route || block?.type !== "text") return;
-		const signal = ctx.signal
-			? AbortSignal.any([ctx.signal, lifetime.signal])
-			: lifetime.signal;
-		const deps: Dependencies = {
-			cwd: ctx.cwd,
-			gate,
-			context: contextOf(ctx),
-			reads,
-			passages,
-			rtk: async (tool, text, pipeline) => {
-				const verify = !recallVerified;
-				const result = await filterPosthook(
-					rtkToolName(tool),
-					text,
-					{ cwd: ctx.cwd, configDirectory: join(pipelines, pipeline), signal },
-					structureCheck(pipeline),
-					verify,
-				);
-				if (verify && result.kind === "filtered") recallVerified = true;
-				return result;
-			},
-		};
-		const work = processRoute(
-			route,
-			{ toolName, toolCallId: event.toolCallId, input },
-			deps,
-		);
-		pending.add(work);
-		try {
-			const processed = await work;
-			if (!processed || signal.aborted || processed.failure === "aborted")
-				return;
-			ledger.record(processed.sample);
-			if (processed.failure) warn(processed.failure, ctx);
-			if (processed.text === undefined) return;
-			// Pi's details, usage, error state, and block metadata stay untouched.
-			// The machine-readable result is not model-facing; keep it complete.
-			return {
-				content: [{ ...block, text: processed.text }],
-				...(event.structuredContent === undefined
-					? {}
-					: { structuredContent: event.structuredContent }),
+	pi.on(
+		"tool_result",
+		async (
+			event: ToolResultEvent,
+			ctx: ExtensionContext,
+		): Promise<ToolResultEventResult | undefined> => {
+			if (
+				process.env.RTK_DISABLED === "1" ||
+				lifetime.signal.aborted ||
+				ctx.signal?.aborted
+			)
+				return undefined;
+			if (
+				(isEditToolResult(event) || isWriteToolResult(event)) &&
+				!event.isError &&
+				typeof event.input.path === "string"
+			)
+				reads.invalidate(resolvePath(event.input.path, ctx.cwd));
+			const route = select(event, ctx.cwd);
+			const block = event.content[0];
+			if (!route || block?.type !== "text") return undefined;
+			const signal = ctx.signal
+				? AbortSignal.any([ctx.signal, lifetime.signal])
+				: lifetime.signal;
+			const deps: Dependencies = {
+				cwd: ctx.cwd,
+				gate,
+				context: contextOf(ctx),
+				reads,
+				passages,
+				rtk: async (
+					tool: string,
+					text: string,
+					pipeline: Pipeline,
+				): Promise<Result> => {
+					const verify = !recallVerified;
+					const result = await filterPosthook(
+						rtkToolName(tool),
+						text,
+						{ cwd: ctx.cwd, configDirectory: join(pipelines, pipeline), signal },
+						structureCheck(pipeline),
+						verify,
+					);
+					if (verify && result.kind === "filtered") recallVerified = true;
+					return result;
+				},
 			};
-		} catch {
-			// Never expose subprocess output or tool content through diagnostics.
-			warn("unexpected", ctx);
-		} finally {
-			pending.delete(work);
-		}
-	});
+			const work = processRoute(route, event, deps);
+			pending.add(work);
+			try {
+				const processed = await work;
+				if (!processed || signal.aborted || processed.failure === "aborted")
+					return undefined;
+				ledger.record(processed.sample);
+				if (processed.failure) warn(processed.failure, ctx);
+				if (processed.text === undefined) return undefined;
+				// Preserve block metadata and structuredContent while replacing only model-facing text.
+				return {
+					content: [{ ...block, text: processed.text }],
+					...(event.structuredContent === undefined
+						? {}
+						: { structuredContent: event.structuredContent }),
+				};
+			} catch {
+				// Never expose subprocess output or tool content through diagnostics.
+				warn("unexpected", ctx);
+				return undefined;
+			} finally {
+				pending.delete(work);
+			}
+		},
+	);
 
-	// Tool results are persisted by now; outcome entries never reach the model.
-	pi.on("turn_end", (event) => {
+	// Append outcome tallies at turn end without exposing them to the model.
+	pi.on("turn_end", (event: TurnEndEvent): TurnEndEventResult | undefined => {
 		const data = ledger.drain();
-		if (data === undefined) return;
+		if (data === undefined) return undefined;
 		return {
 			entries: [
 				...event.entries,
@@ -181,12 +194,12 @@ export default function rtkPiExtended(pi: ExtensionAPI) {
 		};
 	});
 
-	/** Mirrors the stock RTK Pi hook's rewrite decision without running the command. */
+	/** Mirror the stock RTK Pi hook's rewrite decision without executing the command. */
 	const rewriter =
 		(rtk: string) =>
 		async (command: string): Promise<boolean | undefined> => {
 			try {
-				// `--` keeps a command starting with `-` from being read as an rtk option.
+				// Pass `--` so commands starting with `-` are not parsed as rtk flags.
 				const result = await pi.exec(rtk, ["rewrite", "--", command], {
 					timeout: REWRITE_TIMEOUT_MS,
 				});
@@ -202,7 +215,7 @@ export default function rtkPiExtended(pi: ExtensionAPI) {
 	pi.registerCommand("rtk-coverage", {
 		description:
 			"Tool-output volume, RTK coverage, and savings from Pi sessions: /rtk-coverage [days] [project|all]",
-		handler: async (args, ctx) => {
+		handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
 			const parsed = parseCoverageArgs(args);
 			if (!parsed.ok) {
 				show(ctx, parsed.message, "error");
@@ -217,15 +230,14 @@ export default function rtkPiExtended(pi: ExtensionAPI) {
 					since,
 				);
 				const scan = await scanSessions(files, since);
-				// Resolve once per report; on Windows a bare name would also match
-				// an rtk.exe planted in Pi's cwd. Without RTK, commands stay unclassified.
+				// Resolve rtk from PATH once per report, leaving commands unclassified when absent.
 				const rtk = resolveExecutable("rtk");
 				const bash = await classifyBash(
 					scan.bashCommands,
-					rtk ? rewriter(rtk) : async () => undefined,
+					rtk ? rewriter(rtk) : async (): Promise<undefined> => undefined,
 				);
 				show(ctx, formatReport(options, scan, bash), "info");
-			} catch (error) {
+			} catch (error: unknown) {
 				const reason = error instanceof Error ? error.message : String(error);
 				show(
 					ctx,
@@ -236,7 +248,7 @@ export default function rtkPiExtended(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (): Promise<void> => {
 		lifetime.abort();
 		forget();
 		await Promise.allSettled([...pending]);

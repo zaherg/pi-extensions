@@ -4,13 +4,7 @@ schema_version = 1
 name = "pi-extended-terminal"
 extends = "rtk:default"
 
-# Bash output RTK did not filter: commands RTK's Pi hook did not rewrite,
-# `rtk` commands whose output still has terminal escapes or carriage returns
-# (RTK passed it through), and views of `*.log` files.
-# `term` = ansi, progress, dedup, base64-elide, cap: the chain `rtk:posthook`
-# applies to non-RTK shell output in Claude Code (`term-default`).
-# RTK 1.x classifies the adapter's `pi-*` tool names as `any`; `when.tool`
-# conditions never match, so each profile has its own directory instead.
+# Apply RTK's terminal cleanup chain to unrewritten Bash output and log files.
 [[hook.after_tool.any]]
 name = "pi-terminal"
 use = ["term"]

@@ -1,7 +1,14 @@
-import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
+import type {
+	Api,
+	AssistantMessage,
+	Model,
+	TextContent,
+	Usage,
+} from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
+	ModelRegistry,
 	SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { redactSecrets } from "../shared/display.ts";
@@ -33,12 +40,28 @@ When conversation.truncated is true, do not assume omitted context proves comple
 
 type Queue = <T>(path: string, operation: () => Promise<T>) => Promise<T>;
 type Host = Pick<ExtensionAPI, "getSettings" | "appendEntry">;
-type Registry = Pick<ExtensionContext["modelRegistry"], "find">;
+type Settings = ReturnType<ExtensionAPI["getSettings"]>;
+type Registry = Pick<ModelRegistry, "find">;
 type Conversation = {
 	messages: { id: string; role: "user" | "assistant"; text: string }[];
 	truncated: boolean;
 	completed: boolean;
 };
+
+interface ProgressUsageEntry {
+	provider: string;
+	model: string;
+	usage: Usage;
+}
+
+export interface ProgressUpdater {
+	schedule(ctx: ExtensionContext): void;
+	invalidate(): void;
+	start(): void;
+	shutdown(): void;
+	finishBeforeExit(): Promise<void>;
+	whenIdle(): Promise<void>;
+}
 
 function record(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -50,17 +73,17 @@ function configError(): never {
 	);
 }
 export function selectProgressModel(
-	settings: unknown,
+	settings: Settings & { progress?: unknown },
 	registry: Registry,
 ): Model<Api> {
 	if (!record(settings)) configError();
-	let provider = settings.defaultProvider;
-	let id = settings.defaultModel;
+	let provider: unknown = settings.defaultProvider;
+	let id: unknown = settings.defaultModel;
 	if (Object.hasOwn(settings, "progress")) {
-		const progress = settings.progress;
+		const progress: unknown = settings.progress;
 		if (
 			!record(progress) ||
-			Object.keys(progress).some((key) => key !== "model")
+			Object.keys(progress).some((key: string) => key !== "model")
 		)
 			configError();
 		if (Object.hasOwn(progress, "model")) {
@@ -91,28 +114,28 @@ export function selectProgressModel(
 }
 
 function safeJson(value: unknown): string {
-	return JSON.stringify(value, (_key, item: unknown) =>
+	return JSON.stringify(value, (_key: string, item: unknown) =>
 		typeof item === "string" ? redactSecrets(item) : item,
 	);
 }
 
-export function projectConversation(entries: SessionEntry[]): Conversation {
+export function projectConversation(entries: readonly SessionEntry[]): Conversation {
 	const messages: Conversation["messages"] = [];
 	let remaining = MAX_TRANSCRIPT_CHARS;
 	let truncated = false;
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		if (entry.type !== "message") continue;
+		if (!entry || entry.type !== "message") continue;
 		const message = entry.message;
 		if (message.role !== "user" && message.role !== "assistant") continue;
 		if (message.role === "assistant" && message.stopReason !== "stop") continue;
-		// Defense in depth, not a general secret or personal-data detector.
+		// Redact common credential patterns before sending transcript excerpts.
 		const text = redactSecrets(
 			typeof message.content === "string"
 				? message.content
 				: message.content
-						.filter((part) => part.type === "text")
-						.map((part) => part.text)
+						.filter((part): part is TextContent => part.type === "text")
+						.map((part: TextContent) => part.text)
 						.join("\n"),
 		);
 		if (!text.trim()) continue;
@@ -133,7 +156,7 @@ export function projectConversation(entries: SessionEntry[]): Conversation {
 	return { messages, truncated, completed };
 }
 function conversation(ctx: ExtensionContext): Conversation {
-	// Honor Pi's context edits and compaction; never resurrect raw hidden content.
+	// Use Pi's session projection so context edits and compaction are respected.
 	const entries: SessionEntry[] = [];
 	for (const {
 		sourceEntry,
@@ -151,7 +174,7 @@ function warning(ctx: ExtensionContext, error: unknown, exiting = false): void {
 	else console.error(message);
 }
 
-// A provider that ignores cancellation must not hold the queue or commit a late result.
+// Race against AbortSignal so providers ignoring cancellation cannot hold the queue.
 async function cancellable<T>(
 	operation: Promise<T>,
 	signal: AbortSignal,
@@ -159,7 +182,7 @@ async function cancellable<T>(
 	signal.throwIfAborted();
 	let onAbort: () => void = () => {};
 	const cancelled = new Promise<never>((_resolve, reject) => {
-		onAbort = () => reject(signal.reason);
+		onAbort = (): void => reject(signal.reason);
 		signal.addEventListener("abort", onAbort, { once: true });
 	});
 	try {
@@ -179,16 +202,16 @@ export function createProgressUpdater(
 	host: Host,
 	queue: Queue,
 	options: { timeoutMs?: number } = {},
-) {
+): ProgressUpdater {
 	let generation = 0;
 	let stopped = false;
 	let closing = false;
 	let pending: Job | undefined;
 	let running: Promise<void> | undefined;
 	let controller: AbortController | undefined;
-	const sameSession = (job: Job) =>
+	const sameSession = (job: Job): boolean =>
 		!stopped && job.ctx.sessionManager.getSessionId() === job.sessionId;
-	const current = (job: Job) =>
+	const current = (job: Job): boolean =>
 		sameSession(job) &&
 		job.generation === generation &&
 		JSON.stringify(conversation(job.ctx)) === JSON.stringify(job.evidence);
@@ -213,7 +236,7 @@ export function createProgressUpdater(
 				tasks: document.tasks,
 				conversation: job.evidence,
 			});
-			// Conservative byte budget leaves room for the prompt and generated JSON.
+			// Reserve a conservative byte budget for the system prompt and generated JSON.
 			if (
 				Buffer.byteLength(payload) >
 				Math.min(MAX_INPUT_BYTES, model.contextWindow - maxTokens - 2048)
@@ -257,7 +280,7 @@ export function createProgressUpdater(
 				);
 			}
 			if (sameSession(job))
-				host.appendEntry("progress-usage", {
+				host.appendEntry<ProgressUsageEntry>("progress-usage", {
 					provider: model.provider,
 					model: model.id,
 					usage: response.usage,
@@ -270,8 +293,8 @@ export function createProgressUpdater(
 					"The background model did not return a complete response.",
 				);
 			const text = response.content
-				.filter((part) => part.type === "text")
-				.map((part) => part.text)
+				.filter((part): part is TextContent => part.type === "text")
+				.map((part: TextContent) => part.text)
 				.join("\n");
 			if (Buffer.byteLength(text) > MAX_OUTPUT_BYTES)
 				throw new ProgressError(
@@ -307,7 +330,7 @@ export function createProgressUpdater(
 					abort.signal,
 				);
 			});
-		} catch (error) {
+		} catch (error: unknown) {
 			if (
 				current(job) &&
 				!(
@@ -352,7 +375,7 @@ export function createProgressUpdater(
 			};
 			if (!running)
 				running = drain()
-					.catch((error) => warning(ctx, error, closing))
+					.catch((error: unknown) => warning(ctx, error, closing))
 					.finally(() => {
 						running = undefined;
 					});
@@ -367,7 +390,7 @@ export function createProgressUpdater(
 		async finishBeforeExit(): Promise<void> {
 			if (!closing) {
 				closing = true;
-				// Pi stops the interactive TUI before awaiting quit handlers.
+				// Log to stderr because Pi stops the interactive TUI before awaiting quit handlers.
 				if (running) console.error("Waiting for progress update before quitting Pi...");
 			}
 			try {

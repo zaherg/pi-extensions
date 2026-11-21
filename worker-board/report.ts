@@ -1,11 +1,14 @@
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { displayLabel } from "../shared/display.ts";
 
-type Phase = "live" | "finished" | "failed" | "missing";
+export type Phase = "live" | "finished" | "failed" | "missing";
 export interface Row {
 	priority: number;
 	text: string;
 }
+
+type AssistantContentBlock = AssistantMessage["content"][number];
 
 const priority = {
 	blocked: 0,
@@ -14,7 +17,7 @@ const priority = {
 	running: 2,
 	pending: 3,
 	completed: 4,
-};
+} as const;
 const record = (v: unknown): v is Record<string, unknown> =>
 	typeof v === "object" && v !== null && !Array.isArray(v);
 const modes = new Set<unknown>(["single", "parallel", "chain"]);
@@ -93,7 +96,7 @@ export function workerRows(
 			return note(`Worker ${i + 1}: unsupported report.`);
 		if (raw.status === "failed" || raw.status === "aborted")
 			reportedFailure = true;
-		// result.task in a chain can contain the preceding worker's entire output.
+		// Read requested task text from call args since chained results can embed full prior output.
 		const request: unknown = Array.isArray(assignments)
 			? assignments[i]
 			: undefined;
@@ -129,15 +132,15 @@ export function workerRows(
 	return rows;
 }
 
-// A batch is one assistant message: simultaneous calls and repeated agent names stay distinct.
-export function latestBatch(entries: SessionEntry[]): Row[] {
+// Group subagent calls by assistant message so parallel workers stay in one batch.
+export function latestBatch(entries: readonly SessionEntry[]): Row[] {
 	const results = new Map<
 		string,
 		{ source: string; details: unknown; phase: Phase }
 	>();
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		if (entry.type !== "message") continue;
+		if (!entry || entry.type !== "message") continue;
 		const msg = entry.message;
 		if (
 			msg.role === "toolResult" &&
@@ -150,7 +153,7 @@ export function latestBatch(entries: SessionEntry[]): Row[] {
 				phase: msg.isError ? "failed" : "finished",
 			});
 		} else if (msg.role === "assistant" && Array.isArray(msg.content)) {
-			const rows = msg.content.flatMap((call) => {
+			const rows = msg.content.flatMap((call: AssistantContentBlock): Row[] => {
 				if (call.type !== "toolCall" || call.name !== "subagent") return [];
 				const result = results.get(call.id);
 				return workerRows(

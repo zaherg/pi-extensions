@@ -3,6 +3,9 @@ import { createReadStream } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
+import type { TextContent, ToolCall } from "@earendil-works/pi-ai";
+import type { CustomEntry } from "@earendil-works/pi-coding-agent";
+import { displayLabel } from "../shared/display.ts";
 import {
 	ENTRY_TYPE,
 	mergeTallies,
@@ -10,12 +13,11 @@ import {
 	parseEntry,
 	type Tally,
 } from "./outcomes.ts";
-import { displayLabel } from "../shared/display.ts";
 import { categoryFor, MIN_BYTES, RTK_IN_COMMAND } from "./policy.ts";
 
 const DEFAULT_DAYS = 30;
 const MAX_DAYS = 365;
-// Each classification spawns `rtk rewrite`; the largest commands go first.
+// Classify the largest commands first when spawning rtk rewrite.
 const MAX_CLASSIFIED = 2_000;
 const CONCURRENCY = 8;
 const TOP_TOOLS = 15;
@@ -41,7 +43,7 @@ const SETUP_COMMANDS = new Set([
 	"true",
 	":",
 ]);
-// Leading command prefixes inside a single segment (e.g. `env FOO=1 node`, `time npm`).
+// Leading command prefixes inside a single segment such as `env FOO=1 node` or `time npm`.
 const PREFIX_COMMANDS = new Set([
 	"env",
 	"time",
@@ -103,13 +105,40 @@ export interface Scan {
 	unreadableLines: number;
 	invalidEntries: number;
 	tools: Map<string, Usage>;
-	/** Delivered bash output keyed by the command the model issued ("" when unknown). */
+	/** Delivered bash output keyed by the model-issued command ("" when unknown). */
 	bashCommands: Map<string, Usage>;
 	tallies: Map<string, Tally>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isTextBlock(value: unknown): value is TextContent {
+	return (
+		isRecord(value) && value.type === "text" && typeof value.text === "string"
+	);
+}
+
+function isBashToolCall(
+	value: unknown,
+): value is Pick<ToolCall, "type" | "id" | "name"> & {
+	arguments: { command: string };
+} {
+	return (
+		isRecord(value) &&
+		value.type === "toolCall" &&
+		value.name === "bash" &&
+		typeof value.id === "string" &&
+		isRecord(value.arguments) &&
+		typeof value.arguments.command === "string"
+	);
+}
+
+function isOutcomeCustomEntry(
+	entry: Record<string, unknown>,
+): entry is Record<string, unknown> & Pick<CustomEntry, "type" | "customType"> {
+	return entry.type === "custom" && entry.customType === ENTRY_TYPE;
 }
 
 function isMissing(error: unknown): boolean {
@@ -124,7 +153,7 @@ function add(usage: Map<string, Usage>, key: string, bytes: number): void {
 	} else usage.set(key, { results: 1, bytes });
 }
 
-/** Recursively collects Pi session `.jsonl` files under `directory` without following symlinks. */
+/** Recursively collect Pi session `.jsonl` files under directory without following symlinks. */
 async function jsonlFiles(directory: string, depth = 0): Promise<string[]> {
 	try {
 		const entries = await readdir(directory, { withFileTypes: true });
@@ -143,21 +172,18 @@ async function jsonlFiles(directory: string, depth = 0): Promise<string[]> {
 		}
 		if (subdirs.length > 0) {
 			const nested = await Promise.all(
-				subdirs.map((subdir) => jsonlFiles(subdir, depth + 1)),
+				subdirs.map((subdir: string) => jsonlFiles(subdir, depth + 1)),
 			);
 			for (const list of nested) found.push(...list);
 		}
 		return found;
-	} catch (error) {
+	} catch (error: unknown) {
 		if (isMissing(error)) return [];
 		throw error;
 	}
 }
 
-/**
- * Session files modified inside the window, including nested subagent sessions
- * under each project directory, without following symlinks.
- */
+/** Return session files modified since sinceMs without following symlinks. */
 export async function sessionFiles(
 	sessionDir: string,
 	scope: Scope,
@@ -171,13 +197,13 @@ export async function sessionFiles(
 			directories = entries
 				.filter((entry) => entry.isDirectory())
 				.map((entry) => join(root, entry.name));
-		} catch (error) {
+		} catch (error: unknown) {
 			if (!isMissing(error)) throw error;
 			directories = [];
 		}
 	}
 	const files = (
-		await Promise.all(directories.map((dir) => jsonlFiles(dir)))
+		await Promise.all(directories.map((dir: string) => jsonlFiles(dir)))
 	).flat();
 	const recent: string[] = [];
 	for (const file of files) {
@@ -190,12 +216,7 @@ function textBytes(content: unknown): number {
 	if (!Array.isArray(content)) return 0;
 	let bytes = 0;
 	for (const block of content) {
-		if (
-			isRecord(block) &&
-			block.type === "text" &&
-			typeof block.text === "string"
-		)
-			bytes += Buffer.byteLength(block.text);
+		if (isTextBlock(block)) bytes += Buffer.byteLength(block.text);
 	}
 	return bytes;
 }
@@ -218,21 +239,15 @@ function scanOutcomeEntry(
 	for (const tally of data.tallies) mergeTallies(scan.tallies, tally);
 }
 
-/** Pi stores the command the model issued, before any `tool_call` rewrite. */
+/** Record bash commands issued by the model before any tool_call hook rewrites them. */
 function collectBashCommands(
 	content: unknown[],
 	commands: Map<string, string>,
 ): void {
 	for (const block of content) {
-		if (!isRecord(block) || block.type !== "toolCall" || block.name !== "bash")
-			continue;
-		const input = block.arguments;
-		if (
-			typeof block.id === "string" &&
-			isRecord(input) &&
-			typeof input.command === "string"
-		)
-			commands.set(block.id, input.command);
+		if (isBashToolCall(block)) {
+			commands.set(block.id, block.arguments.command);
+		}
 	}
 }
 
@@ -263,11 +278,11 @@ function scanEntry(
 	commands: Map<string, string>,
 	scan: Scan,
 ): void {
-	if (entry.type === "custom" && entry.customType === ENTRY_TYPE) {
+	if (isOutcomeCustomEntry(entry)) {
 		scanOutcomeEntry(entry, sinceMs, scan);
 		return;
 	}
-	// Subagent transcript artifacts omit `type: "message"`; ignore non-session records.
+	// Ignore non-session records such as subagent transcript artifacts.
 	if (entry.type !== "message") return;
 	const message = entry.message;
 	if (!isRecord(message)) return;
@@ -277,7 +292,7 @@ function scanEntry(
 		scanToolResult(message, sinceMs, commands, scan);
 }
 
-/** Aggregate delivered tool output and this extension's outcomes; never reads result text beyond its size. */
+/** Aggregate delivered tool output byte counts and extension outcome tallies across sessions. */
 export async function scanSessions(
 	files: readonly string[],
 	sinceMs: number,
@@ -312,19 +327,19 @@ export async function scanSessions(
 	return scan;
 }
 
-/** `true` when RTK's Pi hook rewrites the command, `undefined` when unknown. */
+/** Return true when RTK's Pi hook rewrites the command, or undefined when unknown. */
 export type Rewrite = (command: string) => Promise<boolean | undefined>;
 
 export interface BashCoverage {
 	rewritten: Usage;
 	notRewritten: Usage;
 	unclassified: Usage;
-	/** Not-rewritten output by first program name. */
+	/** Non-rewritten bash output grouped by leading program name. */
 	programs: Map<string, Usage>;
 }
 
 function segmentProgram(segment: string): string | undefined {
-	// Skip VAR=value prefixes and transparent wrappers (`env`, `time`, ...) so values never print.
+	// Skip VAR=value assignments and transparent command wrappers so values never print.
 	const words = segment.match(/[^\s;&|()]+/g) ?? [];
 	let fallback: string | undefined;
 	let prefix: string | undefined;
@@ -356,7 +371,7 @@ function segmentProgram(segment: string): string | undefined {
 }
 
 function program(command: string): string {
-	// Join line continuations and blank quoted strings so embedded separators or values never split or print.
+	// Join line continuations and blank quoted literals so embedded separators or secrets never surface.
 	const sanitized = command
 		.replace(/\\\r?\n/g, " ")
 		.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, "''");
@@ -385,9 +400,11 @@ export async function classifyBash(
 		unclassified: { results: 0, bytes: 0 },
 		programs: new Map(),
 	};
-	const queue = [...commands].sort((a, b) => b[1].bytes - a[1].bytes);
+	const queue = [...commands].sort(
+		(a: [string, Usage], b: [string, Usage]) => b[1].bytes - a[1].bytes,
+	);
 	let next = 0;
-	const worker = async () => {
+	const worker = async (): Promise<void> => {
 		while (next < queue.length) {
 			const index = next++;
 			const [command, usage] = queue[index] ?? ["", { results: 0, bytes: 0 }];
@@ -442,7 +459,7 @@ function usageLine(label: string, usage: Usage, total: number): string {
 }
 
 function byBytes<K>(usage: Iterable<[K, Usage]>): [K, Usage][] {
-	return [...usage].sort((a, b) => b[1].bytes - a[1].bytes);
+	return [...usage].sort((a: [K, Usage], b: [K, Usage]) => b[1].bytes - a[1].bytes);
 }
 
 interface Savings {
@@ -452,7 +469,7 @@ interface Savings {
 	results: number;
 }
 
-/** Accepted replacements only; unchanged and failed attempts never count. */
+/** Sum byte savings from accepted replacements grouped by key. */
 function savingsBy(
 	scan: Scan,
 	key: (tally: Tally) => string,
@@ -470,31 +487,33 @@ function savingsBy(
 	return savings;
 }
 
-// Tool and program names come from session files and model-authored commands;
-// strip terminal controls and credentials before they reach the report.
+// Sanitize tool and program names before rendering them in the report.
 function label(name: string, limit = 16): string {
 	return displayLabel(name, limit) || "?";
 }
 
 function toolSection(scan: Scan): string[] {
-	const byTool = savingsBy(scan, (tally) => tally.tool);
+	const byTool = savingsBy(scan, (tally: Tally) => tally.tool);
 	const delivered = [...scan.tools.values()].reduce(
-		(sum, item) => sum + item.bytes,
+		(sum: number, item: Usage) => sum + item.bytes,
 		0,
 	);
 	const results = [...scan.tools.values()].reduce(
-		(sum, item) => sum + item.results,
+		(sum: number, item: Usage) => sum + item.results,
 		0,
 	);
-	const saved = [...byTool.values()].reduce((sum, item) => sum + item.saved, 0);
+	const saved = [...byTool.values()].reduce(
+		(sum: number, item: Savings) => sum + item.saved,
+		0,
+	);
 	const touched = [...byTool.values()].reduce(
-		(sum, item) => sum + item.touched,
+		(sum: number, item: Savings) => sum + item.touched,
 		0,
 	);
-	// Sessions store delivered text, so the original is delivered plus accepted savings.
+	// Sessions store delivered text, so original volume equals delivered bytes plus accepted savings.
 	const original = delivered + saved;
 	const tools = [...scan.tools]
-		.map(([tool, usage]) => {
+		.map(([tool, usage]: [string, Usage]) => {
 			const own = byTool.get(tool) ?? { touched: 0, saved: 0, results: 0 };
 			return { tool, usage, own, original: usage.bytes + own.saved };
 		})
@@ -518,16 +537,18 @@ function toolSection(scan: Scan): string[] {
 
 function mechanismSection(scan: Scan): string[] {
 	const byMechanism = byBytes(
-		[...savingsBy(scan, (tally) => tally.mechanism)].map(
-			([name, item]) =>
-				[name, { results: item.results, bytes: item.saved }] as [string, Usage],
+		[...savingsBy(scan, (tally: Tally) => tally.mechanism)].map(
+			([name, item]: [string, Savings]): [string, Usage] => [
+				name,
+				{ results: item.results, bytes: item.saved },
+			],
 		),
 	);
 	if (byMechanism.length === 0) return [];
 	return [
 		"Savings by mechanism (accepted replacements)",
 		...byMechanism.map(
-			([name, item]) =>
+			([name, item]: [string, Usage]) =>
 				`  ${label(name).padEnd(16)} ${size(item.bytes).padStart(9)} saved in ${item.results} results`,
 		),
 		"",
@@ -545,7 +566,7 @@ function bashSection(scan: Scan, bash: BashCoverage): string[] {
 	const programs = byBytes(bash.programs).slice(0, TOP_PROGRAMS);
 	if (programs.length > 0) {
 		const listed = programs.map(
-			([name, item]) =>
+			([name, item]: [string, Usage]) =>
 				`${label(name, 32)} ${size(item.bytes)} (${item.results})`,
 		);
 		lines.push(`  largest not rewritten: ${listed.join(", ")}`);
@@ -585,7 +606,7 @@ function outcomeSection(scan: Scan): string[] {
 	const removed = percent(filtered.before - filtered.after, filtered.before);
 	const failed = totals.get("failed")?.results ?? 0;
 	const detail = [...reasons]
-		.map(([reason, count]) => `${reason} ${count}`)
+		.map(([reason, count]: [string, number]) => `${reason} ${count}`)
 		.join(", ");
 	lines.push(
 		`  filtered   ${filtered.results} results, ${size(filtered.before)} -> ${size(filtered.after)} (${removed} removed)`,

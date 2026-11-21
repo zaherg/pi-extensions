@@ -2,11 +2,7 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import type { ReadView } from "./views.ts";
 
-/**
- * Model-visible tool-result text by tool call ID, after compaction and
- * context edits. Deduplication only points at text found here, so
- * compaction, branch changes, and pruning invalidate it automatically.
- */
+/** Model-visible tool result text keyed by tool call ID after compaction and context edits. */
 export type ContextResults = ReadonlyMap<string, string>;
 
 export interface ReadSource {
@@ -17,7 +13,7 @@ export interface ReadSource {
 	body: string;
 }
 
-/** File lines `from`-`to` (inclusive) of a view that an earlier verbatim read shows identically. */
+/** Inclusive file line range shared identically with an earlier verbatim read. */
 export interface Overlap {
 	source: ReadSource;
 	from: number;
@@ -26,10 +22,10 @@ export interface Overlap {
 
 const MAX_INDEXED_CHARS = 16 * 1024 * 1024;
 
-/** Any start line: a Bash file view is followed by `read` at an arbitrary offset. */
+/** Sentinel start line matching reads at any offset after a Bash file view. */
 export const ANY_START = 0;
 
-/** Shared line range of a source and a view, if every shared line is identical. */
+/** Return the shared line range of a source and view when every overlapping line matches. */
 function overlap(source: ReadSource, view: ReadView): Overlap | undefined {
 	const from = Math.max(source.start, view.start);
 	const to =
@@ -45,14 +41,14 @@ function overlap(source: ReadSource, view: ReadView): Overlap | undefined {
 	return { source, from, to };
 }
 
-/** Verbatim `read` results this extension delivered in the current session. */
+/** Verbatim read results delivered in the current session. */
 export class ReadIndex {
 	readonly #sources: ReadSource[] = [];
 	/** Start lines per path whose last delivery was a stub or condensed view. */
 	readonly #replaced = new Map<string, Set<number>>();
 	#chars = 0;
 
-	/** Record a verbatim delivery; it ends the forced re-read it satisfied. */
+	/** Record a verbatim read and clear any forced re-read marker for its range. */
 	record(path: string, toolCallId: string, view: ReadView): void {
 		const replaced = this.#replaced.get(path);
 		replaced?.delete(view.start);
@@ -71,14 +67,14 @@ export class ReadIndex {
 		}
 	}
 
-	/** The last delivery from `start` (or `ANY_START`) was a stub or condensed view. */
+	/** Mark the last delivery from start (or ANY_START) as a stub or condensed view. */
 	markReplaced(path: string, start: number): void {
 		const replaced = this.#replaced.get(path) ?? new Set<number>();
 		replaced.add(start);
 		this.#replaced.set(path, replaced);
 	}
 
-	/** Reading a replaced range again returns the exact text. */
+	/** Return true when re-reading this range must deliver the exact text. */
 	forcesFull(path: string, start: number): boolean {
 		const replaced = this.#replaced.get(path);
 		return (
@@ -86,10 +82,7 @@ export class ReadIndex {
 		);
 	}
 
-	/**
-	 * Earlier verbatim reads of `path` whose lines shared with `view` are all
-	 * identical, largest overlap first and newest first among equals.
-	 */
+	/** Return earlier verbatim reads overlapping view identically, ordered by size then recency. */
 	overlaps(path: string, view: ReadView): Overlap[] {
 		const found: Overlap[] = [];
 		for (let index = this.#sources.length - 1; index >= 0; index--) {
@@ -97,11 +90,11 @@ export class ReadIndex {
 			const shared = source?.path === path ? overlap(source, view) : undefined;
 			if (shared) found.push(shared);
 		}
-		// `sort` is stable, so equal overlaps stay newest first.
-		return found.sort((a, b) => b.to - b.from - (a.to - a.from));
+		// Rely on stable sort so equal-length overlaps stay newest first.
+		return found.sort((a: Overlap, b: Overlap) => b.to - b.from - (a.to - a.from));
 	}
 
-	/** Forget a path after `edit` or `write` changed it. */
+	/** Forget cached reads for a path after edit or write modifies it. */
 	invalidate(path: string): void {
 		this.#replaced.delete(path);
 		for (let index = this.#sources.length - 1; index >= 0; index--) {
@@ -119,7 +112,7 @@ export class ReadIndex {
 	}
 }
 
-/** Passages shorter than this are never replaced: the stub would barely save anything. */
+/** Minimum byte length required before a passage can be deduplicated. */
 export const MIN_PASSAGE_BYTES = 256;
 const MAX_PASSAGES = 50_000;
 
@@ -134,10 +127,10 @@ function digest(tool: string, passage: string): string {
 export function passages(text: string): string[] {
 	return text
 		.split("\n\n")
-		.filter((passage) => Buffer.byteLength(passage) >= MIN_PASSAGE_BYTES);
+		.filter((passage: string) => Buffer.byteLength(passage) >= MIN_PASSAGE_BYTES);
 }
 
-/** Long passages each tool delivered verbatim, by content hash. */
+/** Long passages delivered verbatim by each tool, indexed by content hash. */
 export class PassageIndex {
 	readonly #calls = new Map<string, string[]>();
 
@@ -149,7 +142,7 @@ export class PassageIndex {
 			this.#calls.delete(key);
 			this.#calls.set(key, calls);
 		}
-		// Maps iterate in insertion order, so the first key is the stalest.
+		// Evict the oldest key first using Map insertion order.
 		while (this.#calls.size > MAX_PASSAGES) {
 			const oldest = this.#calls.keys().next().value;
 			if (oldest === undefined) break;
@@ -157,7 +150,7 @@ export class PassageIndex {
 		}
 	}
 
-	/** Earlier calls of `tool` that delivered this exact passage, newest first. */
+	/** Return earlier calls of tool that delivered this exact passage, newest first. */
 	calls(tool: string, passage: string): readonly string[] {
 		return (this.#calls.get(digest(tool, passage)) ?? []).toReversed();
 	}
@@ -167,10 +160,7 @@ export class PassageIndex {
 	}
 }
 
-/**
- * Replace long passages that an earlier result of the same tool still shows
- * the model. The final passage is kept so status lines and notices survive.
- */
+/** Replace repeated non-final passages still visible in earlier results of the same tool. */
 export function dedupPassages(
 	tool: string,
 	text: string,
@@ -181,21 +171,21 @@ export function dedupPassages(
 	const out: string[] = [];
 	let omitted = 0;
 	let pending: { count: number; bytes: number; call: string } | undefined;
-	const flush = () => {
+	const flush = (): void => {
 		if (!pending) return;
 		out.push(
 			`[rtk-pi-extended: ${pending.count} passage(s), ${pending.bytes} bytes, omitted; identical text is in the ${tool} result of tool call ${pending.call} earlier in this conversation]`,
 		);
 		pending = undefined;
 	};
-	parts.forEach((part, position) => {
+	parts.forEach((part: string, position: number): void => {
 		const last = position === parts.length - 1;
 		const bytes = Buffer.byteLength(part);
 		let call: string | undefined;
 		if (!last && bytes >= MIN_PASSAGE_BYTES) {
 			const candidates = index.calls(tool, part);
 			const visible = context();
-			// Prefer extending the active marker when the same earlier call also contains this passage.
+			// Extend the active marker when the same earlier call also contains this passage.
 			if (
 				pending &&
 				candidates.includes(pending.call) &&
@@ -203,7 +193,7 @@ export function dedupPassages(
 			) {
 				call = pending.call;
 			} else {
-				call = candidates.find((id) => visible.get(id)?.includes(part));
+				call = candidates.find((id: string) => visible.get(id)?.includes(part));
 			}
 		}
 		if (call === undefined) {

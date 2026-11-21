@@ -1,7 +1,7 @@
 import { FAILURES, type Failure } from "./bridge.ts";
 import type { Category } from "./policy.ts";
 
-/** Session entry type; entries never reach the model. */
+/** Custom session entry type for persisted outcome tallies. */
 export const ENTRY_TYPE = "rtk-pi-extended";
 const ENTRY_VERSION = 1;
 const CATEGORIES: readonly Category[] = [
@@ -11,26 +11,23 @@ const CATEGORIES: readonly Category[] = [
 	"generic",
 ];
 const OUTCOMES = ["filtered", "unchanged", "failed"] as const;
-// One or more mechanism names joined by `+`, such as `rtk:listing+grep-group`.
+// Match one or more mechanism names joined by `+`, such as `rtk:listing+grep-group`.
 const MECHANISM = /^[a-z][a-z-]*(?::[a-z-]+)?(?:\+[a-z][a-z-]*(?::[a-z-]+)?)*$/;
 
 export type Outcome = (typeof OUTCOMES)[number];
 
-/**
- * Aggregated results for one tool, category, mechanism, outcome, and failure
- * reason. Only `filtered` tallies count as savings.
- */
+/** Aggregated byte and result counts for one tool, category, mechanism, and outcome. */
 export interface Tally {
 	tool: string;
 	category: Category;
-	/** What produced (or would have produced) the replacement. */
+	/** Mechanism chain that produced or attempted the replacement. */
 	mechanism: string;
 	outcome: Outcome;
 	reason?: Failure;
 	count: number;
 	/** UTF-8 bytes of the original result text. */
 	bytesBefore: number;
-	/** UTF-8 bytes of the text Pi kept (the original unless filtered). */
+	/** UTF-8 bytes of the retained result text. */
 	bytesAfter: number;
 }
 
@@ -51,7 +48,7 @@ function key(tally: Sample): string {
 	]);
 }
 
-/** Merge tallies with the same identity; counts and byte totals add. */
+/** Merge a tally into the map by adding counts and byte totals for matching keys. */
 export function mergeTallies(target: Map<string, Tally>, tally: Tally): void {
 	const id = key(tally);
 	const current = target.get(id);
@@ -107,14 +104,14 @@ type Identity = Pick<
 
 function parseIdentity(value: Record<string, unknown>): Identity | undefined {
 	const { tool, mechanism, reason } = value;
-	const category = CATEGORIES.find((candidate) => candidate === value.category);
-	const outcome = OUTCOMES.find((candidate) => candidate === value.outcome);
-	const failure = FAILURES.find((candidate) => candidate === reason);
+	const category = CATEGORIES.find((candidate: Category) => candidate === value.category);
+	const outcome = OUTCOMES.find((candidate: Outcome) => candidate === value.outcome);
+	const failure = FAILURES.find((candidate: Failure) => candidate === reason);
 	if (typeof tool !== "string" || tool === "") return undefined;
 	if (typeof mechanism !== "string" || !MECHANISM.test(mechanism))
 		return undefined;
 	if (category === undefined || outcome === undefined) return undefined;
-	// Only failures carry a reason, and every failure has a known one.
+	// Require known failure reasons exclusively on failed outcomes.
 	if (reason !== undefined && failure === undefined) return undefined;
 	if ((outcome === "failed") !== (failure !== undefined)) return undefined;
 	const identity = { tool, category, mechanism, outcome };
@@ -122,13 +119,13 @@ function parseIdentity(value: Record<string, unknown>): Identity | undefined {
 }
 
 function validSizes(outcome: Outcome, before: number, after: number): boolean {
-	// Only accepted replacements are smaller; other outcomes keep the original.
+	// Accepted replacements must shrink the output while other outcomes preserve size.
 	return outcome === "filtered" ? after < before : after === before;
 }
 
 function parseTally(value: unknown): Tally | undefined {
 	if (!isRecord(value)) return undefined;
-	if (Object.keys(value).some((field) => !TALLY_FIELDS.has(field)))
+	if (Object.keys(value).some((field: string) => !TALLY_FIELDS.has(field)))
 		return undefined;
 	const identity = parseIdentity(value);
 	const { count, bytesBefore, bytesAfter } = value;
@@ -144,12 +141,12 @@ function parseTally(value: unknown): Tally | undefined {
 	return { ...identity, count, bytesBefore, bytesAfter };
 }
 
-/** Validate persisted entry data; `undefined` marks an unsupported or corrupt entry. */
+/** Parse and validate persisted outcome entry data. */
 export function parseEntry(data: unknown): EntryData | undefined {
 	if (!isRecord(data) || data.version !== ENTRY_VERSION) return undefined;
 	if (
 		Object.keys(data).some(
-			(field) => field !== "version" && field !== "tallies",
+			(field: string) => field !== "version" && field !== "tallies",
 		)
 	)
 		return undefined;
