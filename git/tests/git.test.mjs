@@ -286,6 +286,11 @@ test("failure output is bounded and empty or truncated output is reported explic
 			"No diagnostic text",
 		),
 	);
+	const emoji = gitResultMessage(Buffer.from(`${"😀".repeat(2000)}b`), 128);
+	assert.ok(emoji.includes("[Last output only]\n😀"));
+	assert.ok(!emoji.includes("\uFFFD"));
+	assert.ok(emoji.endsWith("😀b"));
+	assert.equal(emoji.isWellFormed(), true);
 });
 
 test("signals are reported without claiming success", async (t) => {

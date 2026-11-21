@@ -1,6 +1,6 @@
 # Pi Extensions
 
-Seven independent extensions for [Pi](https://pi.dev), covering Git commands, task progress, PhpStorm MCP integration for pi acp, RTK filtering and savings, and quitting a session.
+Nine independent extensions for [Pi](https://pi.dev), including Git commands, task progress, tool history, worker status, PhpStorm MCP integration for pi acp, and RTK filtering and savings.
 Enable only the extensions needed.
 
 ## Extensions at a glance
@@ -14,6 +14,8 @@ Enable only the extensions needed.
 | [Progress](#progress) | `progress/index.ts` | Opt-in, persistent task tracking with background model updates and a standalone CLI. |
 | [RTK for other Pi tools](#rtk-for-other-pi-tools) | `rtk-pi-extended/index.ts` | Filters Bash, search, and MCP results that RTK's own Pi hook misses, and reports Pi-specific coverage with `/rtk-coverage`. |
 | [RTK gain](#rtk-gain) | `rtk-gain/index.ts` | Shows local RTK token savings in the footer and reports per-sandbox totals with `/rtk-gain all`. |
+| [Trace](#trace) | `trace/index.ts` | `/trace failed bash` finds a recorded failure on the current branch without rerunning it. |
+| [Worker board](#worker-board) | `worker-board/index.ts` | `/workers` shows assignments and reported outcomes from a compatible `subagent` runner. |
 
 ## Installation
 
@@ -271,6 +273,53 @@ These are RTK estimates across all agents using each RTK history, not billed tok
 Use `/rtk-coverage` for the bytes actually removed by `rtk-pi-extended` in Pi sessions.
 The two extensions can be enabled independently.
 Deleting a sandbox removes its RTK history from the combined report.
+
+## Trace
+
+Use `/trace` to browse recorded tool results, `/trace failed` to list errors, or `/trace failed bash` to filter by exact tool name.
+Results are newest first on the active branch, including retained entries from before compaction.
+The picker shows status, tool, time, and session entry ID, not commands or output.
+Select a row for its retained text, or use the older/newer choices to page through history.
+The preview strips terminal controls, redacts common credential patterns, and is limited to the last 20 lines and 4,000 UTF-16 code units.
+If the 16,384-unit input tail starts mid-line, that line is omitted because it can lack the label identifying a credential.
+Diagnostics can still contain private data.
+
+Errors are Pi's `isError` flag, not guesses from text or exit-code strings.
+Direct `!` shell commands, nested calls without their own result entry, images, tool details, and files mentioned in output are not inspected.
+Trace never reruns a tool, calls a model, or adds a session entry.
+
+## Worker board
+
+Use `/workers` to pin a board above the editor, `/workers 2` to see another page, and `/workers hide` to close it.
+The source is the **parent session's `subagent` tool**, such as Pi 1.6's optional `examples/extensions/subagent` runner.
+The board does not install or start the runner; without reports it stays empty rather than showing unrelated sessions.
+To use Pi's example, load it with `-e "$PI_PACKAGE_ROOT/examples/extensions/subagent/index.ts"` and define a user agent in `~/.pi/agent/agents/` as described in the runner's README.
+Open `/workers` in the parent session before delegating a task.
+Delegation can incur model charges; viewing the board does not.
+
+The board follows top-level calls in the current batch and restores the latest batch on the active branch after it finishes.
+Each row shows the reported state, worker, source reference and slot, original assignment preview, and last reported tool name when available.
+The reference is the tool call ID during execution and the session result entry ID after recording.
+Failed and explicitly blocked workers sort first, with six workers per page and at most two terminal lines per row.
+A completed worker means the **runner** reported completion, not that tests passed.
+Silence is not a blocker, and a saved `running` report is not evidence of a live process.
+
+Compatible runners use tool name `subagent` and emit `details.mode` (`single`, `parallel`, or `chain`) and ordered `details.results` with `agent` and `status` fields.
+Pi's example reports `pending`, `running`, `completed`, `failed`, or `aborted`; the board also accepts an explicit `blocked` with optional `blocker` text.
+Workers with the same name keep separate slots.
+Chain assignments use the original prompt template, never the previous worker's expanded output.
+The board does not read transcript files, send messages, infer missing outcomes, or make model calls.
+Assignment previews can contain private text; common credential redaction is not a guarantee.
+
+Both commands work in the terminal and with RPC clients that implement Pi's extension UI.
+To try the two extensions from this checkout without installing them:
+
+```sh
+pi -e ./trace/index.ts -e ./worker-board/index.ts
+```
+
+Run `node --test trace/tests/*.test.mjs worker-board/tests/*.test.mjs` from the package root.
+If the Pi peers are not installed in the checkout, set `PI_PACKAGE_ROOT` to the installed `@earendil-works/pi-coding-agent` directory for the worker-board tests.
 
 ## Update or remove
 

@@ -1,0 +1,7 @@
+.ruff_cache/
+.serena/
+.codegraph/
+.pi/
+
+node_modules/
+skills/
