@@ -10,6 +10,7 @@ import {
 	parseEntry,
 	type Tally,
 } from "./outcomes.ts";
+import { displayLabel } from "../shared/display.ts";
 import { categoryFor, MIN_BYTES, RTK_IN_COMMAND } from "./policy.ts";
 
 const DEFAULT_DAYS = 30;
@@ -469,8 +470,10 @@ function savingsBy(
 	return savings;
 }
 
-function label(name: string): string {
-	return name.length > 16 ? `${name.slice(0, 15)}…` : name;
+// Tool and program names come from session files and model-authored commands;
+// strip terminal controls and credentials before they reach the report.
+function label(name: string, limit = 16): string {
+	return displayLabel(name, limit) || "?";
 }
 
 function toolSection(scan: Scan): string[] {
@@ -542,7 +545,8 @@ function bashSection(scan: Scan, bash: BashCoverage): string[] {
 	const programs = byBytes(bash.programs).slice(0, TOP_PROGRAMS);
 	if (programs.length > 0) {
 		const listed = programs.map(
-			([name, item]) => `${name} ${size(item.bytes)} (${item.results})`,
+			([name, item]) =>
+				`${label(name, 32)} ${size(item.bytes)} (${item.results})`,
 		);
 		lines.push(`  largest not rewritten: ${listed.join(", ")}`);
 	}

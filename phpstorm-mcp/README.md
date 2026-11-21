@@ -30,7 +30,7 @@ Closing PhpStorm after registration does not unregister the server; Pi handles t
 
 On macOS, detection uses the running GUI application's `com.jetbrains.PhpStorm` bundle identifier, excluding background stdio bridges.
 On Linux, it checks native `phpstorm`/`phpstorm64` processes or a Java process with `-Didea.platform.prefix=PhpStorm`.
-On Windows, it checks `phpstorm.exe`/`phpstorm64.exe` through PowerShell's process query.
+On Windows, it checks `phpstorm.exe`/`phpstorm64.exe` through PowerShell's process query, running `powershell.exe` by its absolute `%SystemRoot%\System32` path.
 Linux and Windows checks exclude processes whose arguments contain `stdioMcpServer`.
 Process queries have a two-second timeout and a 1 MiB output limit; query failures and unsupported platforms report an error without registering the server.
 This is an application-presence check, not an MCP health check: disabled MCP support, incorrect connection settings, or the IDE exiting after the check can still cause connection failures.
@@ -54,7 +54,7 @@ pi install git:github.com/zaherg/pi-phpstorm-mcp
 
 Pi manages the Git checkout and records the package in `~/.pi/agent/settings.json`.
 You do not need to clone the repository manually.
-Configure the server if the defaults do not match your installation, then restart the existing Pi ACP session.
+Create the server configuration file (see below), then restart the existing Pi ACP session.
 
 Remove the Git-installed package with:
 
@@ -70,7 +70,9 @@ Use `pi remove "$PWD"` from the same directory to remove a local installation.
 
 The extension reads `~/.pi/agent/pi-phpstorm-mcp.json` at the start of each RPC session when PhpStorm is running and registers it as `phpstorm`.
 The file contains one MCP server configuration object, without an `mcpServers` wrapper.
-If the file does not exist, the extension uses these defaults:
+The file is required: there are no built-in defaults, because the executable path and MCP port differ per installation.
+If it does not exist, the extension registers nothing and shows a warning naming the expected path.
+Create it with the executable path, arguments, and port supplied by PhpStorm's MCP settings, for example:
 
 ```json
 {
@@ -78,18 +80,14 @@ If the file does not exist, the extension uses these defaults:
   "env": {
     "IJ_MCP_SERVER_PORT": "64442"
   },
-  "command": "/Users/zaher/Applications/PhpStorm.app/Contents/MacOS/phpstorm",
+  "command": "/Applications/PhpStorm.app/Contents/MacOS/phpstorm",
   "args": ["stdioMcpServer"]
 }
 ```
 
-These defaults are specific to the original macOS installation, including the username, application location, and MCP port.
-For another installation, use the executable path, arguments, and port supplied by PhpStorm's MCP settings.
-To change the settings, create `~/.pi/agent/pi-phpstorm-mcp.json` with the JSON object shown here and edit its values.
-An existing file replaces the defaults rather than merging with them.
 Restart the Pi ACP session after changing the file.
 The extension does not create the file automatically.
-Unreadable files and malformed JSON report an error with the file path; they do not fall back to defaults.
+Unreadable files and malformed JSON report an error with the file path.
 Pi validates the server configuration and rejects invalid settings.
 
 Do not also add `phpstorm` to `~/.pi/agent/mcp.json` or the project's `.pi/mcp.json` if it should remain RPC-only.
@@ -104,7 +102,7 @@ Run the dependency-free tests with Node.js 22.19 or later:
 npm test
 ```
 
-Tests cover JSON configuration, missing-file defaults, configuration changes between sessions, and file errors.
+Tests cover JSON configuration, a missing file (no registration), configuration changes between sessions, and file errors.
 They also exercise the extension's registration boundary for RPC, TUI, print, and JSON sessions, and verify that discovery alone does not inspect applications or register a server.
 Detection tests cover running and closed applications, leftover bridges, unrelated process mentions, repeated session checks, and failed or incomplete process queries.
 The tests use simulated process-query results and a simulated macOS application registry; they do not launch PhpStorm or verify a live IDE connection.

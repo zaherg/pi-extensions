@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { resolveExecutable } from "./shared/executable.ts";
 
 export default function (pi: ExtensionAPI) {
 	let running = false;
@@ -18,6 +19,13 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			// Never run a git.exe planted in the project on Windows.
+			const git = resolveExecutable("git");
+			if (!git) {
+				notify("git was not found on PATH.", "error");
+				return;
+			}
+
 			running = true;
 			let command = "git add .";
 			try {
@@ -26,7 +34,7 @@ export default function (pi: ExtensionAPI) {
 					["commit", "-m", "wip"],
 				]) {
 					command = `git ${gitArgs.join(" ")}`;
-					const result = await pi.exec("git", gitArgs, { cwd: ctx.cwd });
+					const result = await pi.exec(git, gitArgs, { cwd: ctx.cwd });
 					if (result.code !== 0 || result.killed) {
 						// Hooks can print secrets, so report status without forwarding output.
 						notify(

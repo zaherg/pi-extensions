@@ -1,4 +1,5 @@
 import type { ExecResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { resolveExecutable } from "../shared/executable.ts";
 
 const counters = ["total_commands", "total_input", "total_output", "total_saved"] as const;
 type Gain = Record<(typeof counters)[number], number>;
@@ -83,9 +84,12 @@ export default function rtkGain(pi: ExtensionAPI) {
 		parse: (json: unknown) => T | undefined,
 		onExit?: (code: number) => string,
 	): Promise<T | string> {
+		// On Windows a bare name would also match an executable planted in the project.
+		const executable = resolveExecutable(command);
+		if (!executable) return `${command} not found`;
 		let result: ExecResult;
 		try {
-			result = await pi.exec(command, args, { cwd, signal, timeout: 5_000, maxBuffer: 1024 * 1024 });
+			result = await pi.exec(executable, args, { cwd, signal, timeout: 5_000, maxBuffer: 1024 * 1024 });
 		} catch {
 			return `could not run ${command}`;
 		}

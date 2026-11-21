@@ -144,7 +144,7 @@ At `session_start`, the extension:
 2. Checks whether the **PhpStorm GUI** is currently running on the host (`isPhpStormRunning`), explicitly ignoring leftover `stdioMcpServer` bridge processes:
    - **macOS (`darwin`):** Queries `NSRunningApplication` via `/usr/bin/osascript` (JXA) for bundle identifier `com.jetbrains.PhpStorm` with non-terminated regular GUI activation policy (`0`).
    - **Linux (`linux`):** Runs `ps -Aww -o comm= -o args=` and matches `phpstorm`, `phpstorm64`, or `java` with `-Didea.platform.prefix=PhpStorm`, excluding `stdioMcpServer` arguments.
-   - **Windows (`win32`):** Queries `Win32_Process` via `powershell.exe` for `phpstorm64.exe` or `phpstorm.exe`, excluding `stdioMcpServer` command lines.
+   - **Windows (`win32`):** Queries `Win32_Process` via `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` (absolute, never resolved from the working directory) for `phpstorm64.exe` or `phpstorm.exe`, excluding `stdioMcpServer` command lines.
    - Process checks have a **2-second timeout** and **1 MiB output limit**, and sanitize child-process errors so process arguments are never leaked.
 3. If PhpStorm is not running, exits silently without registering MCP. If the process query itself fails, throws a descriptive error without registering.
 4. Reads `~/.pi/agent/pi-phpstorm-mcp.json` and calls `pi.registerMcpServer("phpstorm", config)` for the current session.
@@ -170,7 +170,7 @@ At `session_start`, the extension:
 
 ### Caveats
 
-- **Always create `~/.pi/agent/pi-phpstorm-mcp.json`:** If the file is missing (`ENOENT`), the fallback object uses the author's `/Users/zaher/Applications/PhpStorm.app/Contents/MacOS/phpstorm` binary path and port `64442`. When the file exists, it replaces the fallback object completely (no field merging). Unreadable files or invalid JSON throw an error rather than falling back.
+- **`~/.pi/agent/pi-phpstorm-mcp.json` is required:** If the file is missing (`ENOENT`), nothing is registered and a warning names the expected path; there is no built-in fallback command. The file is used as-is (no field merging). Unreadable files or invalid JSON throw an error.
 - **Avoid duplicate `mcp.json` entries:** Defining `phpstorm` in global or project `mcp.json` overrides `registerMcpServer` and connects in every Pi mode regardless of whether PhpStorm is open.
 - **Session-start check only:** The extension does not launch PhpStorm, poll for IDE startup/shutdown mid-session, distinguish JetBrains from other RPC clients while PhpStorm is open, or health-check the MCP port. If PhpStorm is started after the RPC session, restart the session.
 
@@ -405,7 +405,7 @@ Run the extension test suites from the repository root with Node's built-in test
 
 ```sh
 # Extensions with zero runtime peer imports at test time:
-node --test phpstorm-mcp/tests/*.test.ts rtk-gain/tests/*.test.mjs trace/tests/*.test.mjs
+node --test shared/tests/*.test.ts phpstorm-mcp/tests/*.test.ts rtk-gain/tests/*.test.mjs trace/tests/*.test.mjs
 
 # Extensions that load @earendil-works/pi-* peers (point PI_PACKAGE_ROOT at your Pi install):
 PI_PACKAGE_ROOT="$HOME/.pi/agent/install/releases/1.6.0/node_modules/@earendil-works/pi-coding-agent" \

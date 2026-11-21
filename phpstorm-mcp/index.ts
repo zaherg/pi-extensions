@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, McpServerConfig } from "@earendil-works/pi-coding-agent";
 import { isPhpStormRunning } from "./running.ts";
 
 export default function phpstormMcp(pi: ExtensionAPI) {
@@ -10,18 +10,18 @@ export default function phpstormMcp(pi: ExtensionAPI) {
 		if (!(await isPhpStormRunning(pi))) return;
 
 		const configPath = join(homedir(), ".pi", "agent", "pi-phpstorm-mcp.json");
-		let config = {
-			type: "stdio" as const,
-			env: { IJ_MCP_SERVER_PORT: "64442" },
-			command: "/Users/zaher/Applications/PhpStorm.app/Contents/MacOS/phpstorm",
-			args: ["stdioMcpServer"],
-		};
+		let config: McpServerConfig;
 		try {
 			config = JSON.parse(readFileSync(configPath, "utf8"));
 		} catch (cause) {
-			if ((cause as NodeJS.ErrnoException).code !== "ENOENT") {
-				throw new Error(`Failed to load PhpStorm MCP configuration from ${configPath}`, { cause });
+			if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+				// No built-in default: PhpStorm's path and MCP port differ per installation.
+				if (ctx.hasUI) {
+					ctx.ui.notify(`PhpStorm MCP was not registered: create ${configPath} with PhpStorm's MCP server settings.`, "warning");
+				}
+				return;
 			}
+			throw new Error(`Failed to load PhpStorm MCP configuration from ${configPath}`, { cause });
 		}
 		pi.registerMcpServer("phpstorm", config);
 	});

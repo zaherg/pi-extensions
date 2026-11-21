@@ -349,3 +349,27 @@ test("formats the report from measured values", async (t) => {
 		),
 	);
 });
+
+test("strips terminal controls from tool and program names in the report", async () => {
+	const evil = "\u001b]52;c;cHduZWQ=\u0007\u001b[2Jpwn\u001b[0m";
+	const bash = await classifyBash(
+		new Map([["\u001b[31mpwn\u001b[0m\u0007 --flag", { results: 1, bytes: 2000 }]]),
+		async () => false,
+	);
+	const scan = {
+		files: 1,
+		unreadableLines: 0,
+		invalidEntries: 0,
+		tools: new Map([
+			["bash", { results: 1, bytes: 2000 }],
+			[`tool${evil}`, { results: 1, bytes: 1000 }],
+		]),
+		bashCommands: new Map(),
+		tallies: new Map(),
+	};
+	const report = formatReport({ days: 7, scope: "project" }, scan, bash);
+	// No ESC, BEL, or other C0 control except newlines survives into the notice.
+	assert.doesNotMatch(report, /[\u0000-\u0009\u000b-\u001f\u007f]/);
+	assert.match(report, /largest not rewritten: pwn 2\.0 KB \(1\)/);
+	assert.match(report, /\n {2}toolpwn {9}/);
+});

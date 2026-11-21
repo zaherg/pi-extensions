@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { isPhpStormRunning } from "../running.ts";
+import { isPhpStormRunning, windowsPowerShell } from "../running.ts";
 
 const success = (stdout: string) => ({ stdout, stderr: "", code: 0, killed: false, truncated: false });
 
@@ -14,7 +14,7 @@ for (const platform of ["darwin", "linux", "win32"] as const) {
 				calls.push(args);
 				return success(platform === "linux" ? "" : "False\r\n");
 			},
-		}, platform);
+		}, platform, {});
 		assert.equal(running, false);
 		assert.equal(calls.length, 1);
 		const [command, args, options] = calls[0];
@@ -26,7 +26,7 @@ for (const platform of ["darwin", "linux", "win32"] as const) {
 			assert.equal(command, "ps");
 			assert.deepEqual(args, ["-Aww", "-o", "comm=", "-o", "args="]);
 		} else {
-			assert.equal(command, "powershell.exe");
+			assert.equal(command, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
 			assert.deepEqual(args.slice(0, 4), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]);
 			assert.match(args[4], /Get-CimInstance Win32_Process/);
 			assert.match(args[4], /CommandLine -notmatch/);
@@ -126,4 +126,10 @@ test("unsupported platforms refuse registration without executing anything", asy
 	await assert.rejects(isPhpStormRunning({
 		exec: async () => { assert.fail("must not execute"); },
 	}, "freebsd"), /unsupported platform freebsd/);
+});
+
+test("Windows PowerShell path is absolute and ignores a relative SystemRoot", () => {
+	assert.equal(windowsPowerShell({ SystemRoot: "D:\\Win" }), "D:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+	assert.equal(windowsPowerShell({ SystemRoot: "Windows", windir: "E:\\W" }), "E:\\W\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+	assert.equal(windowsPowerShell({ SystemRoot: ".\\evil" }), "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
 });

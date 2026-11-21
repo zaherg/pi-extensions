@@ -512,7 +512,7 @@ test("/rtk-coverage reports session usage and rejects bad arguments", async (t) 
 		sessionManager: { getSessionDir: () => sessionDir },
 	} as unknown as ExtensionCommandContext;
 	await handler("7", commandCtx);
-	assert.deepEqual(asked, [["rtk", "rewrite", "python3 x.py"]]);
+	assert.deepEqual(asked, [["rtk", "rewrite", "--", "python3 x.py"]]);
 	assert.equal(notices[0]?.level, "info");
 	const report = notices[0]?.message.split("\n") ?? [];
 	assert.equal(

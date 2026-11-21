@@ -19,6 +19,7 @@ import { ENTRY_TYPE, Ledger } from "./outcomes.ts";
 import { rtkToolName, select, structureCheck } from "./policy.ts";
 import { type Dependencies, type Processed, processRoute } from "./process.ts";
 import { resolvePath } from "./views.ts";
+import { resolveExecutable } from "../shared/executable.ts";
 
 const REWRITE_TIMEOUT_MS = 2_000;
 
@@ -181,19 +182,22 @@ export default function rtkPiExtended(pi: ExtensionAPI) {
 	});
 
 	/** Mirrors the stock RTK Pi hook's rewrite decision without running the command. */
-	const rewrites = async (command: string): Promise<boolean | undefined> => {
-		try {
-			const result = await pi.exec("rtk", ["rewrite", command], {
-				timeout: REWRITE_TIMEOUT_MS,
-			});
-			if (result.killed) return undefined;
-			if (result.code !== 0 && result.code !== 3) return false;
-			const rewritten = result.stdout.trim();
-			return rewritten !== "" && rewritten !== command;
-		} catch {
-			return undefined;
-		}
-	};
+	const rewriter =
+		(rtk: string) =>
+		async (command: string): Promise<boolean | undefined> => {
+			try {
+				// `--` keeps a command starting with `-` from being read as an rtk option.
+				const result = await pi.exec(rtk, ["rewrite", "--", command], {
+					timeout: REWRITE_TIMEOUT_MS,
+				});
+				if (result.killed) return undefined;
+				if (result.code !== 0 && result.code !== 3) return false;
+				const rewritten = result.stdout.trim();
+				return rewritten !== "" && rewritten !== command;
+			} catch {
+				return undefined;
+			}
+		};
 
 	pi.registerCommand("rtk-coverage", {
 		description:
@@ -213,7 +217,13 @@ export default function rtkPiExtended(pi: ExtensionAPI) {
 					since,
 				);
 				const scan = await scanSessions(files, since);
-				const bash = await classifyBash(scan.bashCommands, rewrites);
+				// Resolve once per report; on Windows a bare name would also match
+				// an rtk.exe planted in Pi's cwd. Without RTK, commands stay unclassified.
+				const rtk = resolveExecutable("rtk");
+				const bash = await classifyBash(
+					scan.bashCommands,
+					rtk ? rewriter(rtk) : async () => undefined,
+				);
 				show(ctx, formatReport(options, scan, bash), "info");
 			} catch (error) {
 				const reason = error instanceof Error ? error.message : String(error);

@@ -38,6 +38,7 @@ function loadExtension(exec: ExtensionAPI["exec"] = async () => success(runningO
 	const handlers = new Map<string, SessionStartHandler[]>();
 	const registrations: { name: string; config: McpServerConfig }[] = [];
 	const checks: Parameters<ExtensionAPI["exec"]>[] = [];
+	const notices: [string, string | undefined][] = [];
 
 	// Only the Pi API members used by this extension are needed in the fixture.
 	const pi: Pick<ExtensionAPI, "on" | "registerMcpServer" | "exec"> = {
@@ -63,9 +64,11 @@ function loadExtension(exec: ExtensionAPI["exec"] = async () => success(runningO
 	return {
 		registrations,
 		checks,
+		notices,
 		async startSession(mode: ExtensionContext["mode"]) {
+			const ui = { notify: (message: string, type?: string) => notices.push([message, type]) };
 			for (const handler of handlers.get("session_start") ?? []) {
-				await handler({ type: "session_start", reason: "startup" }, { mode } as ExtensionContext);
+				await handler({ type: "session_start", reason: "startup" }, { mode, hasUI: true, ui } as unknown as ExtensionContext);
 			}
 		},
 	};
@@ -109,19 +112,15 @@ test("reads changed configuration on the next session start", async () => {
 	]);
 });
 
-test("uses the original defaults when the configuration file is missing", async () => {
+test("registers nothing and asks for configuration when the file is missing", async () => {
 	const extension = loadExtension();
 	await extension.startSession("rpc");
 
-	assert.deepEqual(extension.registrations, [{
-		name: "phpstorm",
-		config: {
-			type: "stdio",
-			env: { IJ_MCP_SERVER_PORT: "64442" },
-			command: "/Users/zaher/Applications/PhpStorm.app/Contents/MacOS/phpstorm",
-			args: ["stdioMcpServer"],
-		},
-	}]);
+	// No machine-specific fallback command is ever registered.
+	assert.deepEqual(extension.registrations, []);
+	assert.equal(extension.notices.length, 1);
+	assert.equal(extension.notices[0][1], "warning");
+	assert.ok(extension.notices[0][0].includes(configPath));
 });
 
 for (const scenario of ["malformed", "unreadable"]) {
@@ -166,6 +165,7 @@ test("skips configuration and registration when PhpStorm is closed", async () =>
 });
 
 test("checks again on the next session after PhpStorm opens", async () => {
+	writeFileSync(configPath, JSON.stringify({ command: "phpstorm" }));
 	let running = false;
 	const extension = loadExtension(async () => success(running ? runningOutput : stoppedOutput));
 	await extension.startSession("rpc");

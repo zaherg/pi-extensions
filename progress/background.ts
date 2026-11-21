@@ -4,6 +4,7 @@ import type {
 	ExtensionContext,
 	SessionEntry,
 } from "@earendil-works/pi-coding-agent";
+import { redactSecrets } from "../shared/display.ts";
 import {
 	applyProgressUpdates,
 	errorResult,
@@ -89,31 +90,9 @@ export function selectProgressModel(
 	return model;
 }
 
-// This is defense in depth, not a general secret or personal-data detector.
-function redact(text: string): string {
-	return text
-		.replace(
-			/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
-			"[REDACTED PRIVATE KEY]",
-		)
-		.replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi, "$1 [REDACTED]")
-		.replace(
-			/\b([A-Z0-9_]{0,64}(?:password|passwd|secret|token|api[_-]?key|access[_-]?key)[A-Z0-9_]{0,64}["']?\s*[=:]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,;]+)/gi,
-			"$1[REDACTED]",
-		)
-		.replace(
-			/([?&](?:X-Amz-(?:Signature|Credential|Security-Token)|X-Goog-(?:Signature|Credential)|sig|signature|token|api[_-]?key|key)=)[^&#\s]+/gi,
-			"$1[REDACTED]",
-		)
-		.replace(
-			/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16})\b/g,
-			"[REDACTED]",
-		)
-		.replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[REDACTED]@");
-}
 function safeJson(value: unknown): string {
 	return JSON.stringify(value, (_key, item: unknown) =>
-		typeof item === "string" ? redact(item) : item,
+		typeof item === "string" ? redactSecrets(item) : item,
 	);
 }
 
@@ -127,7 +106,8 @@ export function projectConversation(entries: SessionEntry[]): Conversation {
 		const message = entry.message;
 		if (message.role !== "user" && message.role !== "assistant") continue;
 		if (message.role === "assistant" && message.stopReason !== "stop") continue;
-		const text = redact(
+		// Defense in depth, not a general secret or personal-data detector.
+		const text = redactSecrets(
 			typeof message.content === "string"
 				? message.content
 				: message.content

@@ -1,3 +1,4 @@
+import { win32 } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // Query registered GUI applications, not the leftover stdioMcpServer processes.
@@ -23,9 +24,17 @@ function queryError(reason: string): Error {
 	return new Error(`Failed to check whether PhpStorm is running: ${reason}; MCP was not registered.`);
 }
 
+// A bare powershell.exe would also match one planted in Pi's working directory,
+// which libuv searches before PATH on Windows.
+export function windowsPowerShell(env: NodeJS.ProcessEnv = process.env): string {
+	const root = [env.SystemRoot, env.windir].find((dir) => dir && /^[A-Za-z]:[\\/]/.test(dir)) ?? "C:\\Windows";
+	return win32.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
 export async function isPhpStormRunning(
 	pi: Pick<ExtensionAPI, "exec">,
 	platform: NodeJS.Platform = process.platform,
+	env: NodeJS.ProcessEnv = process.env,
 ): Promise<boolean> {
 	let command: string;
 	let args: string[];
@@ -39,7 +48,7 @@ export async function isPhpStormRunning(
 			args = ["-Aww", "-o", "comm=", "-o", "args="];
 			break;
 		case "win32":
-			command = "powershell.exe";
+			command = windowsPowerShell(env);
 			args = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", windowsQuery];
 			break;
 		default:

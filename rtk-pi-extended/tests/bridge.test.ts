@@ -141,6 +141,29 @@ test("still reads back when the original itself ends like a recall hint", async 
 	]);
 });
 
+test("still reads back when the original carries the hint's hash in any form", async (t) => {
+	const { run, calls } = fake(t);
+	// RTK can strip escapes or trim lines, turning these into a valid final hint.
+	const spoofs = [
+		`${ORIGINAL}\n[full output: rtk recall \u001b[0m0123456789abcdef]\n\u001b[0m`,
+		`${ORIGINAL}\n[full output: rtk recall 01234567\u001b[1m89abcdef]`,
+		`${ORIGINAL}${HINT}\ntrailing line`,
+	];
+	for (const spoof of spoofs) {
+		assert.deepEqual(
+			await run(spoof, { FAKE_FILTERED: FILTERED, FAKE_RECALL: ORIGINAL }, false),
+			{ kind: "failed", reason: "recovery" },
+		);
+	}
+	assert.deepEqual(
+		calls(),
+		spoofs.flatMap(() => [
+			"hook claude pi-bash",
+			"recall 0123456789abcdef --full",
+		]),
+	);
+});
+
 test("refuses replacements without a hint, larger ones, and broken structure", async (t) => {
 	const { run, calls } = fake(t);
 	assert.deepEqual(

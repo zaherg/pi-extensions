@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
-import { TextDecoder } from "node:util";
+import { stripVTControlCharacters, TextDecoder } from "node:util";
+import { resolveExecutable } from "../shared/executable.ts";
 
 const MAX_BYTES = 2 * 1024 * 1024;
 const TIMEOUT_MS = 2_000;
@@ -55,9 +56,13 @@ export async function invokeRtk(
 		return { ok: false, reason: "input-limit" };
 	}
 
+	// On Windows a bare name would also match an rtk.exe planted in the project cwd.
+	const executable = resolveExecutable(options.executable ?? "rtk");
+	if (!executable) return { ok: false, reason: "unavailable" };
+
 	return new Promise((resolve) => {
 		const grouped = process.platform !== "win32";
-		const child = spawn(options.executable ?? "rtk", args, {
+		const child = spawn(executable, args, {
 			cwd: options.cwd,
 			env: {
 				...(options.env ?? process.env),
@@ -196,7 +201,7 @@ export type StructureCheck = (original: string, filtered: string) => boolean;
  *
  * RTK appends a recall hint only after its store saved the original. With
  * `verifyRecall: false` the readback is skipped, unless the original itself
- * ends like a hint and could pass for one.
+ * ends like a hint or contains the hint's hash and could have supplied it.
  */
 export async function filterPosthook(
 	toolName: string,
@@ -237,7 +242,16 @@ export async function filterPosthook(
 	// Readback also prevents a source line resembling a recall hint from being trusted.
 	const hash = RECALL_HINT.exec(filtered)?.[1];
 	if (!hash) return { kind: "failed", reason: "recovery" };
-	if (verifyRecall || RECALL_HINT.test(text)) {
+	// Without a readback, a hint is trusted only if the original could not have
+	// supplied it. RTK may strip escapes or trim lines, so a hash found anywhere
+	// in the original, even split by control characters, forces the readback.
+	if (
+		verifyRecall ||
+		RECALL_HINT.test(text) ||
+		stripVTControlCharacters(text)
+			.replace(/[\p{Cc}\p{Cf}]/gu, "")
+			.includes(hash)
+	) {
 		const recalled = await invokeRtk(["recall", hash, "--full"], "", options);
 		if (!recalled.ok) return { kind: "failed", reason: recalled.reason };
 		if (recalled.stdout !== text) return { kind: "failed", reason: "recovery" };

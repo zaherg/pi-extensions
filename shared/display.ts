@@ -1,12 +1,9 @@
 import { stripVTControlCharacters } from "node:util";
 
-// Display-only protection for common credentials, not an arbitrary-secret detector.
-function clean(text: string): string {
-	return stripVTControlCharacters(text)
-		.replace(/\r\n?/g, "\n")
-		.replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
-			character === "\n" || character === "\t" ? character : "",
-		)
+// Heuristic protection for common credentials, not an arbitrary-secret detector.
+// Shared by display output and text sent to models, so both redact the same forms.
+export function redactSecrets(text: string): string {
+	return text
 		.replace(
 			/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
 			"[REDACTED PRIVATE KEY]",
@@ -28,7 +25,18 @@ function clean(text: string): string {
 			/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16})\b/g,
 			"[REDACTED]",
 		)
-		.replace(/(https?:\/\/)[^\s/@]+@/gi, "$1[REDACTED]@")
+		.replace(/(https?:\/\/)[^\s/@]+@/gi, "$1[REDACTED]@");
+}
+
+// Display-only cleanup: terminal controls removed, then credentials redacted.
+function clean(text: string): string {
+	return redactSecrets(
+		stripVTControlCharacters(text)
+			.replace(/\r\n?/g, "\n")
+			.replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
+				character === "\n" || character === "\t" ? character : "",
+			),
+	)
 		.replace(/^\n+/, "")
 		.trimEnd();
 }
