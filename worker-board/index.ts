@@ -38,6 +38,7 @@ export default function workerBoard(pi: ExtensionAPI): void {
 	const batch = new Map<string, { args: unknown; rows: Row[] }>();
 	let page = 0;
 	let previous = "";
+	let hidden = false;
 
 	function draw(ctx: ExtensionContext, requested?: number): void {
 		if (!ctx.hasUI || (!page && !requested)) return;
@@ -91,10 +92,13 @@ export default function workerBoard(pi: ExtensionAPI): void {
 			if (!ctx.hasUI)
 				throw new Error("/workers requires an interactive Pi or RPC UI.");
 			const value = args.trim();
-			if (value === "hide") hide(ctx);
-			else if (!value || /^[1-9]\d{0,8}$/.test(value))
+			if (value === "hide") {
+				hidden = true;
+				hide(ctx);
+			} else if (!value || /^[1-9]\d{0,8}$/.test(value)) {
+				hidden = false;
 				draw(ctx, Number(value || 1));
-			else ctx.ui.notify("Usage: /workers [page|hide]", "warning");
+			} else ctx.ui.notify("Usage: /workers [page|hide]", "warning");
 		},
 	});
 
@@ -107,6 +111,16 @@ export default function workerBoard(pi: ExtensionAPI): void {
 		)
 			return;
 		const callArgs: unknown = event.args;
+		const isManagement =
+			typeof callArgs === "object" &&
+			callArgs !== null &&
+			"action" in callArgs &&
+			!("agent" in callArgs) &&
+			!("tasks" in callArgs) &&
+			!("chain" in callArgs) &&
+			!("workflow" in callArgs) &&
+			!("workflowScript" in callArgs);
+		if (!page && !hidden && !isManagement) page = 1;
 		batch.set(event.toolCallId, {
 			args: callArgs,
 			rows: workerRows(event.toolCallId, callArgs, undefined, "live"),
@@ -141,6 +155,7 @@ export default function workerBoard(pi: ExtensionAPI): void {
 	});
 	function settled(ctx: ExtensionContext): void {
 		batch.clear();
+		hidden = false;
 		draw(ctx);
 	}
 	// Clear transient live state once persisted results are available on the branch.
@@ -149,6 +164,7 @@ export default function workerBoard(pi: ExtensionAPI): void {
 	pi.on("session_tree", (_event: SessionTreeEvent, ctx: ExtensionContext): void => settled(ctx));
 	pi.on("session_shutdown", (_event: SessionShutdownEvent, ctx: ExtensionContext): void => {
 		batch.clear();
+		hidden = false;
 		hide(ctx);
 	});
 }

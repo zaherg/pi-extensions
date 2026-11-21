@@ -9,6 +9,7 @@ export interface Row {
 }
 
 type AssistantContentBlock = AssistantMessage["content"][number];
+type WorkerStatus = keyof typeof priority;
 
 const priority = {
 	blocked: 0,
@@ -20,26 +21,52 @@ const priority = {
 } as const;
 const record = (v: unknown): v is Record<string, unknown> =>
 	typeof v === "object" && v !== null && !Array.isArray(v);
-const modes = new Set<unknown>(["single", "parallel", "chain"]);
-const knownStatus = (v: unknown): v is keyof typeof priority =>
+const modes = new Set<unknown>([
+	"single",
+	"parallel",
+	"chain",
+	"workflow",
+	"management",
+]);
+const knownStatus = (v: unknown): v is WorkerStatus =>
 	typeof v === "string" && Object.hasOwn(priority, v);
 
-function lastTool(messages: unknown): string {
-	if (!Array.isArray(messages)) return "";
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const msg: unknown = messages[i];
-		if (!record(msg)) continue;
-		if (msg.role === "toolResult" && typeof msg.toolName === "string") {
-			const name = displayLabel(msg.toolName, 32);
-			if (name) return name;
-			continue;
-		}
-		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
-		for (let j = msg.content.length - 1; j >= 0; j--) {
-			const b: unknown = msg.content[j];
-			if (!record(b) || b.type !== "toolCall" || typeof b.name !== "string")
+function inferStatus(
+	raw: Record<string, unknown>,
+	phase: Phase,
+): WorkerStatus | undefined {
+	if (knownStatus(raw.status)) return raw.status;
+	if (typeof raw.exitCode === "number")
+		return raw.exitCode === 0 ? "completed" : "failed";
+	if (phase === "live") return "running";
+	return undefined;
+}
+
+function lastTool(messages: unknown, toolCalls?: unknown): string {
+	if (Array.isArray(messages)) {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const msg: unknown = messages[i];
+			if (!record(msg)) continue;
+			if (msg.role === "toolResult" && typeof msg.toolName === "string") {
+				const name = displayLabel(msg.toolName, 32);
+				if (name) return name;
 				continue;
-			const name = displayLabel(b.name, 32);
+			}
+			if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+			for (let j = msg.content.length - 1; j >= 0; j--) {
+				const b: unknown = msg.content[j];
+				if (!record(b) || b.type !== "toolCall" || typeof b.name !== "string")
+					continue;
+				const name = displayLabel(b.name, 32);
+				if (name) return name;
+			}
+		}
+	}
+	if (Array.isArray(toolCalls)) {
+		for (let i = toolCalls.length - 1; i >= 0; i--) {
+			const entry: unknown = toolCalls[i];
+			if (!record(entry) || typeof entry.text !== "string") continue;
+			const name = displayLabel(entry.text, 32);
 			if (name) return name;
 		}
 	}
@@ -70,6 +97,95 @@ export function workerRows(
 		return [note("No compatible worker report.")];
 	}
 	if (!details.results.length) {
+		if (details.mode === "workflow") {
+			const wfState =
+				record(details.workflowChildren) &&
+				typeof details.workflowChildren.workflowState === "string"
+					? displayLabel(details.workflowChildren.workflowState, 24)
+					: "";
+			const statusKey =
+				phase === "failed" || wfState === "failed"
+					? "failed"
+					: phase === "live" ||
+							wfState === "running" ||
+							typeof details.asyncId === "string"
+						? "running"
+						: "completed";
+			const statusLabel =
+				phase !== "live" && statusKey === "running"
+					? "last reported running"
+					: statusKey;
+			const name =
+				displayLabel(
+					record(args) && typeof args.workflow === "string"
+						? args.workflow
+						: "workflow",
+					32,
+				) || "workflow";
+			const mission =
+				record(args) && typeof args.mission === "string"
+					? displayLabel(args.mission, 64)
+					: "";
+			const asyncTag = typeof details.asyncId === "string" ? "async" : "";
+			return [
+				{
+					priority: priority[statusKey],
+					text: [`${statusLabel} ${name} ${ref}`, mission, asyncTag]
+						.filter(Boolean)
+						.join(" · "),
+				},
+			];
+		}
+		if (typeof details.asyncId === "string") {
+			const agent =
+				(record(args) && typeof args.agent === "string"
+					? displayLabel(args.agent, 32)
+					: "") || "worker";
+			const task =
+				record(args) && typeof args.task === "string"
+					? displayLabel(args.task, 64)
+					: "";
+			const statusLabel =
+				phase === "failed"
+					? "failed"
+					: phase === "live"
+						? "running (async)"
+						: "last reported async";
+			return [
+				{
+					priority: phase === "failed" ? 0 : priority.running,
+					text: [`${statusLabel} ${agent} ${ref}`, task]
+						.filter(Boolean)
+						.join(" · "),
+				},
+			];
+		}
+		if (details.mode === "management") {
+			const action =
+				(record(args) && typeof args.action === "string"
+					? displayLabel(args.action, 24)
+					: "") || "action";
+			const state =
+				record(details.lifecycleStatus) &&
+				record(details.lifecycleStatus.processTerminal) &&
+				typeof details.lifecycleStatus.processTerminal.state === "string"
+					? displayLabel(details.lifecycleStatus.processTerminal.state, 24)
+					: record(details.steering) &&
+							typeof details.steering.state === "string"
+						? displayLabel(details.steering.state, 24)
+						: "";
+			return [
+				{
+					priority: phase === "failed" ? 0 : priority.completed,
+					text: [
+						`${phase === "failed" ? "failed" : "completed"} management:${action} ${ref}`,
+						state && `state: ${state}`,
+					]
+						.filter(Boolean)
+						.join(" · "),
+				},
+			];
+		}
 		return [
 			phase === "failed"
 				? note("Call failed; no worker outcome reported.", 0)
@@ -88,13 +204,14 @@ export function workerRows(
 	let reportedFailure = false;
 	const rows = details.results.map((raw: unknown, i: number): Row => {
 		const slot = `${ref}/${i + 1}`;
+		if (!record(raw))
+			return { priority: 1, text: `${slot} Unsupported worker report.` };
 		const agent =
-			record(raw) && typeof raw.agent === "string"
-				? displayLabel(raw.agent, 32)
-				: "";
-		if (!record(raw) || !agent || !knownStatus(raw.status))
-			return note(`Worker ${i + 1}: unsupported report.`);
-		if (raw.status === "failed" || raw.status === "aborted")
+			typeof raw.agent === "string" ? displayLabel(raw.agent, 32) : "";
+		const statusKey = inferStatus(raw, phase);
+		if (!agent || !statusKey)
+			return { priority: 1, text: `${slot} Unsupported worker report.` };
+		if (statusKey === "failed" || statusKey === "aborted")
 			reportedFailure = true;
 		// Read requested task text from call args since chained results can embed full prior output.
 		const request: unknown = Array.isArray(assignments)
@@ -107,16 +224,16 @@ export function workerRows(
 				? displayLabel(request.task, 64)
 				: "";
 		const blocker =
-			raw.status === "blocked" && typeof raw.blocker === "string"
+			statusKey === "blocked" && typeof raw.blocker === "string"
 				? displayLabel(raw.blocker, 64)
 				: "";
-		const last = lastTool(raw.messages);
+		const last = lastTool(raw.messages, raw.toolCalls);
 		const status =
-			phase !== "live" && (raw.status === "running" || raw.status === "pending")
-				? `last reported ${raw.status}`
-				: raw.status;
+			phase !== "live" && (statusKey === "running" || statusKey === "pending")
+				? `last reported ${statusKey}`
+				: statusKey;
 		return {
-			priority: priority[raw.status],
+			priority: priority[statusKey],
 			text: [
 				`${status} ${agent} ${slot}`,
 				blocker && `blocked by: ${blocker}`,
