@@ -69,6 +69,10 @@ export class Ledger {
 		mergeTallies(this.#tallies, { ...sample, count: 1 });
 	}
 
+	clear(): void {
+		this.#tallies.clear();
+	}
+
 	/** Return pending tallies as entry data and clear them. */
 	drain(): EntryData | undefined {
 		if (this.#tallies.size === 0) return undefined;
@@ -104,8 +108,12 @@ type Identity = Pick<
 
 function parseIdentity(value: Record<string, unknown>): Identity | undefined {
 	const { tool, mechanism, reason } = value;
-	const category = CATEGORIES.find((candidate: Category) => candidate === value.category);
-	const outcome = OUTCOMES.find((candidate: Outcome) => candidate === value.outcome);
+	const category = CATEGORIES.find(
+		(candidate: Category) => candidate === value.category,
+	);
+	const outcome = OUTCOMES.find(
+		(candidate: Outcome) => candidate === value.outcome,
+	);
 	const failure = FAILURES.find((candidate: Failure) => candidate === reason);
 	if (typeof tool !== "string" || tool === "") return undefined;
 	if (typeof mechanism !== "string" || !MECHANISM.test(mechanism))

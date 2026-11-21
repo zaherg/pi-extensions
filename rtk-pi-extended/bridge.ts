@@ -25,7 +25,6 @@ export const FAILURES = [
 export type Failure = (typeof FAILURES)[number];
 
 export interface ProcessOptions {
-	cwd: string;
 	configDirectory: string;
 	signal?: AbortSignal | undefined;
 	// Allow process overrides for isolated checks without exposing them to pipeline configs.
@@ -63,7 +62,8 @@ export async function invokeRtk(
 	return new Promise<ProcessResult>((resolve) => {
 		const grouped = process.platform !== "win32";
 		const child = spawn(executable, args, {
-			cwd: options.cwd,
+			// Run in configDirectory so project .rtk/ files cannot override the bundled profile.
+			cwd: options.configDirectory,
 			env: {
 				...(options.env ?? process.env),
 				RTK_CONFIG_DIR: options.configDirectory,
@@ -150,7 +150,8 @@ function replacementText(stdout: string): string | undefined {
 	} catch {
 		return undefined;
 	}
-	if (!isRecord(document) || !isRecord(document.hookSpecificOutput)) return undefined;
+	if (!isRecord(document) || !isRecord(document.hookSpecificOutput))
+		return undefined;
 	const hook = document.hookSpecificOutput;
 	if (hook.hookEventName !== "PostToolUse" || !isRecord(hook.updatedToolOutput))
 		return undefined;

@@ -13,7 +13,7 @@ import {
 	parseEntry,
 	type Tally,
 } from "./outcomes.ts";
-import { categoryFor, MIN_BYTES, RTK_IN_COMMAND } from "./policy.ts";
+import { categoryFor, isRtkWrapped, MIN_BYTES } from "./policy.ts";
 
 const DEFAULT_DAYS = 30;
 const MAX_DAYS = 365;
@@ -120,9 +120,10 @@ function isTextBlock(value: unknown): value is TextContent {
 	);
 }
 
-function isBashToolCall(
-	value: unknown,
-): value is Pick<ToolCall, "type" | "id" | "name"> & {
+function isBashToolCall(value: unknown): value is Pick<
+	ToolCall,
+	"type" | "id" | "name"
+> & {
 	arguments: { command: string };
 } {
 	return (
@@ -411,7 +412,7 @@ export async function classifyBash(
 			let rewritten: boolean | undefined;
 			if (command.trim() === "" || index >= MAX_CLASSIFIED)
 				rewritten = undefined;
-			else if (RTK_IN_COMMAND.test(command)) rewritten = true;
+			else if (isRtkWrapped(command)) rewritten = true;
 			else rewritten = await rewrite(command);
 
 			if (rewritten === undefined) merge(coverage.unclassified, usage);
@@ -442,13 +443,13 @@ function percent(part: number, whole: number): string {
 function owner(tool: string): string {
 	switch (categoryFor(tool)) {
 		case "terminal":
-			return "rtk rewrite, else terminal";
+			return "rtk rewrite, terminal, lossless";
 		case "read":
 			return "dedup, non-code views";
 		case "listing":
 			return tool === "grep" ? "listing, grep groups" : "listing";
 		case "generic":
-			return "generic";
+			return "generic, lossless, dedup";
 		default:
 			return "none";
 	}
@@ -459,7 +460,9 @@ function usageLine(label: string, usage: Usage, total: number): string {
 }
 
 function byBytes<K>(usage: Iterable<[K, Usage]>): [K, Usage][] {
-	return [...usage].sort((a: [K, Usage], b: [K, Usage]) => b[1].bytes - a[1].bytes);
+	return [...usage].sort(
+		(a: [K, Usage], b: [K, Usage]) => b[1].bytes - a[1].bytes,
+	);
 }
 
 interface Savings {

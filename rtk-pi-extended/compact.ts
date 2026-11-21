@@ -1,29 +1,44 @@
 import { stripJsonIndentation } from "./views.ts";
 
 // Lossless rewrites that verify exact round-trip reconstruction before returning.
-const MATCH = /^(.+?):(\d+): /;
-const COMPACT = /^ (\d+)([:-]) /;
+const MATCH = /^(.+?):(\d+):/;
+const COMPACT = /^ (\d+)([:-])(.*)$/;
 
 interface GrepLine {
 	path: string;
-	/** Match or context suffix such as `:12: text` or `-13- text`. */
+	/** Match or context suffix such as `:12: text`, `:12:text`, or `-13-text`. */
 	rest: string;
 }
 
+function isGrepPath(path: string): boolean {
+	return (
+		path !== "" &&
+		path !== "--" &&
+		// Reject bare timestamps, bracketed clock prefixes, and URL schemes.
+		!/^\s|^\[?\d+$|^\d{4}-\d{2}-\d{2}[T ]\d{2}$/.test(path) &&
+		!path.includes("://")
+	);
+}
+
 /** Attach a grep context line to its surrounding match block path. */
-function contextLine(line: string, path: string | undefined): GrepLine | undefined {
+function contextLine(
+	line: string,
+	path: string | undefined,
+): GrepLine | undefined {
 	if (path === undefined || !line.startsWith(`${path}-`)) return undefined;
 	const rest = line.slice(path.length);
-	return /^-\d+- /.test(rest) ? { path, rest } : undefined;
+	return /^-\d+-/.test(rest) ? { path, rest } : undefined;
 }
 
 function parseGrep(lines: readonly string[]): (GrepLine | undefined)[] {
-	const parsed: (GrepLine | undefined)[] = lines.map((line: string): GrepLine | undefined => {
-		const path = MATCH.exec(line)?.[1];
-		return path === undefined
-			? undefined
-			: { path, rest: line.slice(path.length) };
-	});
+	const parsed: (GrepLine | undefined)[] = lines.map(
+		(line: string): GrepLine | undefined => {
+			const path = MATCH.exec(line)?.[1];
+			return path !== undefined && isGrepPath(path)
+				? { path, rest: line.slice(path.length) }
+				: undefined;
+		},
+	);
 	// Propagate file paths across trailing and leading context lines.
 	let previous: string | undefined;
 	for (let index = 0; index < lines.length; index++) {
@@ -53,8 +68,14 @@ export function ungroupGrep(text: string): string {
 		if (compact && heading !== undefined) {
 			const separator = compact[2] ?? ":";
 			out.push(
-				`${heading}${separator}${compact[1]}${separator} ${line.slice(compact[0].length)}`,
+				`${heading}${separator}${compact[1]}${separator}${compact[3] ?? ""}`,
 			);
+		} else if (
+			line === "--" &&
+			heading !== undefined &&
+			COMPACT.test(lines[index + 1] ?? "")
+		) {
+			out.push(line);
 		} else if (COMPACT.test(lines[index + 1] ?? "")) {
 			heading = line;
 		} else {
@@ -76,13 +97,14 @@ export function groupGrep(text: string): string | undefined {
 	for (let index = 0; index < lines.length; index++) {
 		const entry = parsed[index];
 		if (entry === undefined) {
-			out.push(lines[index] ?? "");
-			current = undefined;
+			const line = lines[index] ?? "";
+			out.push(line);
+			if (line !== "--") current = undefined;
 			continue;
 		}
 		if (entry.path !== current) out.push(entry.path);
 		current = entry.path;
-		// Convert `:12: text` to ` 12: text` and `-13- text` to ` 13- text`.
+		// Convert `:12:text` to ` 12:text` and `-13-text` to ` 13-text`.
 		out.push(` ${entry.rest.slice(1)}`);
 	}
 	const grouped = out.join("\n");
@@ -96,10 +118,28 @@ const MAX_SUFFIX = 400;
 const MIN_REPEATS = 3;
 const MAX_FOOTNOTES = 3;
 const MAX_LINES = 5_000;
+const FENCE = /^`{3,}/;
 
-function bestSuffix(lines: readonly string[]): string | undefined {
+function unfencedMask(lines: readonly string[]): boolean[] {
+	let inFence = false;
+	return lines.map((line: string): boolean => {
+		if (FENCE.test(line)) {
+			inFence = !inFence;
+			return false;
+		}
+		return !inFence;
+	});
+}
+
+function bestSuffix(
+	lines: readonly string[],
+	eligible: readonly boolean[],
+): string | undefined {
 	const counts = new Map<string, number>();
-	for (const line of lines.slice(0, MAX_LINES)) {
+	const limit = Math.min(lines.length, MAX_LINES);
+	for (let row = 0; row < limit; row++) {
+		if (!eligible[row]) continue;
+		const line = lines[row] ?? "";
 		const seen = new Set<string>();
 		const from = Math.max(1, line.length - MAX_SUFFIX);
 		for (
@@ -152,16 +192,17 @@ export function unfactorSuffixes(text: string): string {
 		.join("\n");
 }
 
-/** Replace repeated long line suffixes with trailing Markdown footnotes. */
+/** Replace repeated long line suffixes outside fenced code blocks with trailing Markdown footnotes. */
 export function factorSuffixes(text: string): string | undefined {
 	if (text.includes("[^")) return undefined;
 	let lines = text.split("\n");
+	const eligible = unfencedMask(lines);
 	const notes: string[] = [];
 	for (let label = 1; label <= MAX_FOOTNOTES; label++) {
-		const suffix = bestSuffix(lines);
+		const suffix = bestSuffix(lines, eligible);
 		if (suffix === undefined) break;
-		lines = lines.map((line: string): string =>
-			line.endsWith(suffix) && line.length > suffix.length
+		lines = lines.map((line: string, index: number): string =>
+			eligible[index] && line.endsWith(suffix) && line.length > suffix.length
 				? `${line.slice(0, -suffix.length)} [^${label}]`
 				: line,
 		);

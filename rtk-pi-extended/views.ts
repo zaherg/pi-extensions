@@ -34,10 +34,11 @@ export function parseReadView(
 	};
 }
 
-/** Pi bash truncation notice on successful output, appended after a blank line. */
-const BASH_TRAILER = /\n\n(\[Showing [^\n]*\. Full output: [^\n]+\])$/;
+/** Pi bash truncation and non-zero exit notices appended after a blank line. */
+const BASH_TRAILER =
+	/\n\n((?:\[Showing [^\n]*\. Full output: [^\n]+\])(?:\n\nCommand exited with code \d+)?|Command exited with code \d+)$/;
 
-/** Split Bash file output into body text and any trailing Pi truncation notice. */
+/** Split Bash output into body text and any trailing Pi truncation or exit notice. */
 export function splitBashTrailer(text: string): {
 	body: string;
 	trailer?: string;
@@ -108,7 +109,10 @@ const NOT_PACKAGES = new Set([
 	"workspaces",
 ]);
 
-const npm: Extract = (line: string, state: ExtractState): string | undefined => {
+const npm: Extract = (
+	line: string,
+	state: ExtractState,
+): string | undefined => {
 	const key = NPM_KEY.exec(line)?.[1];
 	if (key !== undefined) {
 		const marker = key.lastIndexOf("node_modules/");
@@ -124,7 +128,10 @@ const npm: Extract = (line: string, state: ExtractState): string | undefined => 
 };
 
 /** Extract name and version pairs from Cargo, Poetry, and uv TOML lockfiles. */
-const tomlPackages: Extract = (line: string, state: ExtractState): string | undefined => {
+const tomlPackages: Extract = (
+	line: string,
+	state: ExtractState,
+): string | undefined => {
 	const name = /^name = "([^"]+)"$/.exec(line)?.[1];
 	if (name !== undefined) {
 		state.name = name;
@@ -137,7 +144,10 @@ const tomlPackages: Extract = (line: string, state: ExtractState): string | unde
 	return entry;
 };
 
-const composer: Extract = (line: string, state: ExtractState): string | undefined => {
+const composer: Extract = (
+	line: string,
+	state: ExtractState,
+): string | undefined => {
 	const name = /^\s*"name": "([^"]+)",$/.exec(line)?.[1];
 	if (name !== undefined) {
 		state.name = name;
@@ -150,7 +160,10 @@ const composer: Extract = (line: string, state: ExtractState): string | undefine
 	return entry;
 };
 
-const yarn: Extract = (line: string, state: ExtractState): string | undefined => {
+const yarn: Extract = (
+	line: string,
+	state: ExtractState,
+): string | undefined => {
 	// Match both Yarn v1 and Berry package header lines.
 	const header = /^"?((?:@[^@/"\s]+\/)?[^@"\s,]+)@[^\n]*:$/.exec(line)?.[1];
 	if (header !== undefined) {

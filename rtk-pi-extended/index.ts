@@ -1,17 +1,15 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
-import {
-	type ExtensionAPI,
-	type ExtensionCommandContext,
-	type ExtensionContext,
-	type ExtensionUIContext,
-	isEditToolResult,
-	isWriteToolResult,
-	type ToolResultEvent,
-	type ToolResultEventResult,
-	type TurnEndEvent,
-	type TurnEndEventResult,
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+	ExtensionUIContext,
+	ToolResultEvent,
+	ToolResultEventResult,
+	TurnEndEvent,
+	TurnEndEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { resolveExecutable } from "../shared/executable.ts";
 import { type Failure, filterPosthook, type Result } from "./bridge.ts";
@@ -26,7 +24,12 @@ import {
 import { type ContextResults, PassageIndex, ReadIndex } from "./dedup.ts";
 import { createGate } from "./gate.ts";
 import { ENTRY_TYPE, Ledger } from "./outcomes.ts";
-import { type Pipeline, rtkToolName, select, structureCheck } from "./policy.ts";
+import {
+	type Pipeline,
+	rtkToolName,
+	select,
+	structureCheck,
+} from "./policy.ts";
 import { type Dependencies, type Processed, processRoute } from "./process.ts";
 import { resolvePath } from "./views.ts";
 
@@ -48,7 +51,11 @@ const FAILURE_MESSAGES: Record<Failure, string> = {
 
 type NotifyLevel = NonNullable<Parameters<ExtensionUIContext["notify"]>[1]>;
 
-function show(ctx: ExtensionContext, message: string, level: NotifyLevel): void {
+function show(
+	ctx: ExtensionContext,
+	message: string,
+	level: NotifyLevel,
+): void {
 	if (ctx.hasUI) ctx.ui.notify(message, level);
 	// Write diagnostics to stderr so JSON or RPC stdout streams stay clean.
 	else process.stderr.write(`${message}\n`);
@@ -63,7 +70,7 @@ function textOf(content: readonly (TextContent | ImageContent)[]): string {
 
 export default function rtkPiExtended(pi: ExtensionAPI): void {
 	const pipelines = join(dirname(fileURLToPath(import.meta.url)), "rtk");
-	const lifetime = new AbortController();
+	let lifetime = new AbortController();
 	const pending = new Set<Promise<Processed | undefined>>();
 	const reported = new Set<Failure>();
 	const ledger = new Ledger();
@@ -105,9 +112,20 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 		passages.clear();
 		contextCache = undefined;
 	};
+	// Recreate lifetime on session_start so non-quit session replacements re-enable filtering.
+	pi.on("session_start", (): void => {
+		lifetime = new AbortController();
+		recallVerified = false;
+		reported.clear();
+		ledger.clear();
+		forget();
+	});
 	// Clear cached indexes on compaction or branch switches to free memory.
 	pi.on("session_compact", forget);
-	pi.on("session_tree", forget);
+	pi.on("session_tree", (): void => {
+		ledger.clear();
+		forget();
+	});
 
 	pi.on(
 		"tool_result",
@@ -115,14 +133,15 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 			event: ToolResultEvent,
 			ctx: ExtensionContext,
 		): Promise<ToolResultEventResult | undefined> => {
+			const sessionSignal = lifetime.signal;
 			if (
 				process.env.RTK_DISABLED === "1" ||
-				lifetime.signal.aborted ||
+				sessionSignal.aborted ||
 				ctx.signal?.aborted
 			)
 				return undefined;
 			if (
-				(isEditToolResult(event) || isWriteToolResult(event)) &&
+				(event.toolName === "edit" || event.toolName === "write") &&
 				!event.isError &&
 				typeof event.input.path === "string"
 			)
@@ -131,8 +150,8 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 			const block = event.content[0];
 			if (!route || block?.type !== "text") return undefined;
 			const signal = ctx.signal
-				? AbortSignal.any([ctx.signal, lifetime.signal])
-				: lifetime.signal;
+				? AbortSignal.any([ctx.signal, sessionSignal])
+				: sessionSignal;
 			const deps: Dependencies = {
 				cwd: ctx.cwd,
 				gate,
@@ -148,7 +167,7 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 					const result = await filterPosthook(
 						rtkToolName(tool),
 						text,
-						{ cwd: ctx.cwd, configDirectory: join(pipelines, pipeline), signal },
+						{ configDirectory: join(pipelines, pipeline), signal },
 						structureCheck(pipeline),
 						verify,
 					);
@@ -165,9 +184,18 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 				ledger.record(processed.sample);
 				if (processed.failure) warn(processed.failure, ctx);
 				if (processed.text === undefined) return undefined;
+				const updated = processed.text;
+				const content =
+					route.blockIndex === undefined
+						? [{ ...block, text: updated }]
+						: event.content.map((item, index) =>
+								index === route.blockIndex && item.type === "text"
+									? { ...item, text: updated }
+									: item,
+							);
 				// Preserve block metadata and structuredContent while replacing only model-facing text.
 				return {
-					content: [{ ...block, text: processed.text }],
+					content,
 					...(event.structuredContent === undefined
 						? {}
 						: { structuredContent: event.structuredContent }),
@@ -184,6 +212,10 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 
 	// Append outcome tallies at turn end without exposing them to the model.
 	pi.on("turn_end", (event: TurnEndEvent): TurnEndEventResult | undefined => {
+		if (lifetime.signal.aborted) {
+			ledger.clear();
+			return undefined;
+		}
 		const data = ledger.drain();
 		if (data === undefined) return undefined;
 		return {
@@ -215,7 +247,10 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 	pi.registerCommand("rtk-coverage", {
 		description:
 			"Tool-output volume, RTK coverage, and savings from Pi sessions: /rtk-coverage [days] [project|all]",
-		handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
+		handler: async (
+			args: string,
+			ctx: ExtensionCommandContext,
+		): Promise<void> => {
 			const parsed = parseCoverageArgs(args);
 			if (!parsed.ok) {
 				show(ctx, parsed.message, "error");
@@ -250,6 +285,7 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async (): Promise<void> => {
 		lifetime.abort();
+		ledger.clear();
 		forget();
 		await Promise.allSettled([...pending]);
 	});

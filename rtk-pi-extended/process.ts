@@ -7,16 +7,18 @@ import {
 	ANY_START,
 	type ContextResults,
 	dedupPassages,
+	dedupReadExcerpts,
 	type Overlap,
 	type PassageIndex,
 	type ReadIndex,
 } from "./dedup.ts";
-import type { Gate } from "./gate.ts";
+import { exceedsCap, type Gate } from "./gate.ts";
 import type { Sample } from "./outcomes.ts";
 import {
 	hasRawTerminalOutput,
 	type Pipeline,
 	type Route,
+	worthCondensing,
 	worthReplacing,
 } from "./policy.ts";
 import {
@@ -31,6 +33,8 @@ import {
 
 /** Minimum byte size before JSON indentation is stripped from read excerpts. */
 const LARGE_JSON_BYTES = 16 * 1024;
+// Preserve raw `grep -n` lines on bash so pi-lens can credit search-reads when loaded after us.
+const RAW_GREP_COMMAND = /\b[ef]?grep\b/;
 
 export type Call = Pick<ToolResultEvent, "toolName" | "toolCallId" | "input">;
 
@@ -237,10 +241,13 @@ async function processRead(
 	deps: Dependencies,
 ): Promise<Processed> {
 	const { path, text } = route;
+	const offset =
+		route.offset ??
+		(typeof call.input === "object" && call.input !== null
+			? (call.input as { offset?: unknown }).offset
+			: undefined);
 	const view =
-		call.toolName === "read"
-			? parseReadView(text, call.input.offset)
-			: undefined;
+		call.toolName === "read" ? parseReadView(text, offset) : undefined;
 	if (call.toolName === "read" && !view)
 		return { sample: sample(call, route, "none", text) };
 
@@ -257,7 +264,7 @@ async function processRead(
 	if (
 		condensed &&
 		!condensed.failure &&
-		worthReplacing(text, condensed.text) &&
+		worthCondensing(text, condensed.text) &&
 		(best === undefined ||
 			Buffer.byteLength(condensed.text) < Buffer.byteLength(best.text))
 	)
@@ -287,34 +294,14 @@ async function processRead(
 	return { sample: sample(call, route, condensed?.mechanism ?? "none", text) };
 }
 
-async function processTerminal(
-	route: Route,
-	call: Call,
-	deps: Dependencies,
-): Promise<Processed | undefined> {
-	const { text } = route;
-	if (route.wrapped && !hasRawTerminalOutput(text)) return undefined;
-	if (!deps.gate("terminal", text))
-		return { sample: sample(call, route, "gate", text) };
-	const result = await deps.rtk(call.toolName, text, "terminal");
-	if (result.kind === "failed")
-		return {
-			sample: sample(
-				call,
-				route,
-				"rtk:terminal",
-				text,
-				undefined,
-				result.reason,
-			),
-			failure: result.reason,
-		};
-	if (result.kind === "filtered" && worthReplacing(text, result.text))
-		return {
-			text: result.text,
-			sample: sample(call, route, "rtk:terminal", text, result.text),
-		};
-	return { sample: sample(call, route, "rtk:terminal", text) };
+/** Detach RTK's trailing recall hint only when RTK actually filtered the step. */
+function splitRecallHint(step: RtkStepResult): { body: string; hint: string } {
+	if (step.mechanisms.length === 0) return { body: step.text, hint: "" };
+	const hint = RECALL_HINT.exec(step.text)?.[0] ?? "";
+	return {
+		body: hint ? step.text.slice(0, -hint.length) : step.text,
+		hint,
+	};
 }
 
 /** Run RTK before lossless rewrites so recall stores the unmodified original text. */
@@ -349,8 +336,9 @@ function finish(
 	current: string,
 	mechanisms: string[],
 	failure?: Failure,
+	defaultMechanism = "none",
 ): Processed {
-	const mechanism = mechanisms.join("+") || "none";
+	const mechanism = mechanisms.join("+") || defaultMechanism;
 	if (current !== route.text && worthReplacing(route.text, current))
 		return {
 			text: current,
@@ -370,22 +358,90 @@ function finish(
 	};
 }
 
+async function processTerminal(
+	route: Route,
+	call: Call,
+	deps: Dependencies,
+): Promise<Processed | undefined> {
+	// Skip spawning RTK on wrapped commands unless raw terminal noise or >300-line output passed through.
+	const allowRtk =
+		!route.wrapped ||
+		hasRawTerminalOutput(route.text) ||
+		exceedsCap(route.text);
+	const gated = allowRtk && deps.gate("terminal", route.text);
+	const step: RtkStepResult = gated
+		? await runRtkStep(route, call, "terminal", deps)
+		: { text: route.text, mechanisms: [] };
+	const mechanisms = [...step.mechanisms];
+	const { body: withoutHint, hint } = splitRecallHint(step);
+	const { body: initialBody, trailer } = splitBashTrailer(withoutHint);
+	let body = initialBody;
+
+	const command =
+		typeof call.input === "object" && call.input !== null
+			? (call.input as { command?: unknown }).command
+			: undefined;
+	const allowGrepGroup =
+		typeof command !== "string" || !RAW_GREP_COMMAND.test(command);
+
+	for (const [name, rewrite] of [
+		["json-compact", compactJsonDocument],
+		...(allowGrepGroup ? ([["grep-group", groupGrep]] as const) : []),
+		["suffix-factor", factorSuffixes],
+	] as const) {
+		const rewritten = rewrite(body);
+		if (rewritten !== undefined && shrinks(body, rewritten)) {
+			body = rewritten;
+			mechanisms.push(name);
+		}
+	}
+	const deduped = dedupPassages(
+		call.toolName,
+		body,
+		deps.passages,
+		deps.context,
+	);
+	if (deduped.omitted > 0) {
+		body = deduped.text;
+		mechanisms.push("passage-dedup");
+	}
+
+	const candidate = withNotice(body, trailer) + hint;
+	const processed = finish(
+		route,
+		call,
+		candidate,
+		mechanisms,
+		step.failure,
+		gated ? "rtk:terminal" : "gate",
+	);
+	deps.passages.record(
+		call.toolName,
+		call.toolCallId,
+		processed.text ?? route.text,
+	);
+	if (route.wrapped && processed.text === undefined && !processed.failure)
+		return undefined;
+	return processed;
+}
+
 async function processListing(
 	route: Route,
 	call: Call,
 	deps: Dependencies,
 ): Promise<Processed> {
 	const step = await runRtkStep(route, call, "listing", deps);
-	let current = step.text;
 	const mechanisms = [...step.mechanisms];
+	const { body: initialBody, hint } = splitRecallHint(step);
+	let body = initialBody;
 	if (call.toolName === "grep") {
-		const grouped = groupGrep(current);
-		if (grouped !== undefined && shrinks(current, grouped)) {
-			current = grouped;
+		const grouped = groupGrep(body);
+		if (grouped !== undefined && shrinks(body, grouped)) {
+			body = grouped;
 			mechanisms.push("grep-group");
 		}
 	}
-	return finish(route, call, current, mechanisms, step.failure);
+	return finish(route, call, body + hint, mechanisms, step.failure);
 }
 
 async function processGeneric(
@@ -395,11 +451,16 @@ async function processGeneric(
 ): Promise<Processed> {
 	const step = await runRtkStep(route, call, "generic", deps);
 	const mechanisms = [...step.mechanisms];
-	// Keep RTK's recall hint as the final line.
-	const hint = RECALL_HINT.exec(step.text)?.[0] ?? "";
-	let body = hint ? step.text.slice(0, -hint.length) : step.text;
+	const { body: initialBody, hint } = splitRecallHint(step);
+	let body = initialBody;
+	const excerpts = dedupReadExcerpts(body, deps.cwd, deps.reads, deps.context);
+	if (excerpts.omitted > 0) {
+		body = excerpts.text;
+		mechanisms.push("excerpt-dedup");
+	}
 	for (const [name, rewrite] of [
 		["json-compact", compactJsonDocument],
+		["grep-group", groupGrep],
 		["suffix-factor", factorSuffixes],
 	] as const) {
 		const rewritten = rewrite(body);

@@ -19,7 +19,7 @@ function hasRepeatedRun(text: string): boolean {
 	return false;
 }
 
-function exceedsCap(text: string): boolean {
+export function exceedsCap(text: string): boolean {
 	const lines = text.split("\n");
 	return (
 		lines.length > CAP_LINES ||
@@ -59,7 +59,9 @@ export function ruleMethods(directory: string): string[] | undefined {
 		(match: RegExpExecArray) => match[1] ?? "",
 	);
 	const methods = names.flatMap((name: string) => CHAINS[name] ?? [name]);
-	return methods.every((name: string) => name in TRIGGERS) ? methods : undefined;
+	return methods.every((name: string) => name in TRIGGERS)
+		? methods
+		: undefined;
 }
 
 /** Check whether a profile's cached pipeline rule could modify text without spawning RTK. */
