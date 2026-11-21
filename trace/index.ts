@@ -10,10 +10,46 @@ const PAGE_SIZE = 25;
 const OLDER = "Older results →";
 const NEWER = "← Newer results";
 
+const PREVIEW_KEYS = [
+	"command",
+	"path",
+	"file_path",
+	"pattern",
+	"query",
+	"url",
+	"action",
+	"agent",
+	"workflow",
+] as const;
+
 interface TraceItem {
 	id: string;
 	time: string;
 	msg: ToolResultMessage;
+	preview: string;
+}
+
+export function callPreview(args: unknown): string {
+	if (typeof args !== "object" || args === null || Array.isArray(args))
+		return "";
+	const rec = args as Record<string, unknown>;
+	for (const key of PREVIEW_KEYS) {
+		const val = rec[key];
+		if (typeof val !== "string") continue;
+		const label = displayLabel(val, 40);
+		if (label) return label;
+	}
+	if (typeof rec.code === "string") {
+		const line =
+			rec.code
+				.split(/\r?\n/u)
+				.find(
+					(l: string): boolean =>
+						Boolean(l.trim()) && !l.trim().startsWith("// @options:"),
+				) ?? "";
+		return displayLabel(line, 40);
+	}
+	return "";
 }
 
 function diagnostic(content: ToolResultMessage["content"]): string {
@@ -60,27 +96,50 @@ export default function trace(pi: ExtensionAPI): void {
 
 	pi.registerCommand("trace", {
 		description:
-			"Inspect recorded tool results on this branch: /trace [failed [tool]]",
+			"Inspect recorded tool results on this branch: /trace [failed] [tool]",
 		handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
 			if (!ctx.hasUI)
 				throw new Error("/trace requires an interactive Pi or RPC UI.");
-			const [filter, tool, extra] = args.trim().split(/\s+/u);
-			if ((filter && filter !== "failed") || extra) {
-				ctx.ui.notify("Usage: /trace [failed [tool]]", "warning");
+			const tokens = args.trim() ? args.trim().split(/\s+/u) : [];
+			if (
+				tokens.length > 2 ||
+				(tokens.length === 2 && tokens[0] !== "failed")
+			) {
+				ctx.ui.notify("Usage: /trace [failed] [tool]", "warning");
 				return;
 			}
+			const failedOnly = tokens[0] === "failed";
+			const tool = failedOnly ? tokens[1] : tokens[0];
+			const calls = new Map<string, unknown>();
 			const results = ctx.sessionManager
 				.getBranch()
 				.flatMap((entry: SessionEntry): TraceItem[] => {
-					if (entry.type !== "message" || entry.message.role !== "toolResult")
+					if (entry.type !== "message") return [];
+					if (
+						entry.message.role === "assistant" &&
+						Array.isArray(entry.message.content)
+					) {
+						for (const block of entry.message.content) {
+							if (block?.type === "toolCall")
+								calls.set(block.id, block.arguments);
+						}
 						return [];
+					}
+					if (entry.message.role !== "toolResult") return [];
 					const msg = entry.message;
 					if (
-						(filter && msg.isError !== true) ||
+						(failedOnly && msg.isError !== true) ||
 						(tool && msg.toolName !== tool)
 					)
 						return [];
-					return [{ id: entry.id, time: entry.timestamp, msg }];
+					return [
+						{
+							id: entry.id,
+							time: entry.timestamp,
+							msg,
+							preview: callPreview(calls.get(msg.toolCallId)),
+						},
+					];
 				})
 				.reverse();
 			if (!results.length) {
@@ -92,8 +151,8 @@ export default function trace(pi: ExtensionAPI): void {
 			for (;;) {
 				const page = results.slice(offset, offset + PAGE_SIZE);
 				const labels = page.map(
-					({ id, time, msg }: TraceItem, i: number): string =>
-						`${offset + i + 1}. ${msg.isError ? "failed" : "ok"} ${displayLabel(msg.toolName, 64) || "?"} · ${displayLabel(time, 32) || "?"} · #${displayLabel(id, 36) || "?"}`,
+					({ id, time, msg, preview }: TraceItem, i: number): string =>
+						`${offset + i + 1}. ${msg.isError ? "failed" : "ok"} ${displayLabel(msg.toolName, 64) || "?"}${preview ? ` (${preview})` : ""} · ${displayLabel(time, 32) || "?"} · #${displayLabel(id, 36) || "?"}`,
 				);
 				const options = [...labels];
 				if (offset) options.push(NEWER);
@@ -120,8 +179,10 @@ export default function trace(pi: ExtensionAPI): void {
 						);
 						return;
 					}
-					ctx.ui.notify(`${pick}\n${diagnostic(selected.msg.content)}`, "info");
-					return;
+					ctx.ui.notify(
+						`${pick}\n${diagnostic(selected.msg.content)}`,
+						selected.msg.isError ? "warning" : "info",
+					);
 				}
 			}
 		},
