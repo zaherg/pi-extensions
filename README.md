@@ -15,8 +15,8 @@ Enable only the extensions you need.
 | [Progress](#progress) | `progress/index.ts` | `/progress`, `progress` tool, `progress/cli.ts`, background updater | All | Yes (opt-in) | Tracks tasks, decisions, steps, and blockers in `~/.config/ai-sessions/<folder>/progress.json` with background updates after replies. |
 | [RTK for other Pi tools](#rtk-for-other-pi-tools) | `rtk-pi-extended/index.ts` | `tool_result` filter, `/rtk-coverage` | All | No | Deduplicates `read` calls, condenses non-code files, filters non-rewritten Bash/search/MCP output through RTK, and reports Pi session savings. |
 | [RTK gain](#rtk-gain) | `rtk-gain/index.ts` | Status-bar item, `/rtk-gain [all]` | All (footer requires UI) | No | Displays local RTK token savings in the footer and summarizes host + running Docker sandbox totals. |
-| [Trace](#trace) | `trace/index.ts` | `/trace [failed [tool]]` | `tui`, `rpc` (with UI) | No | Browses recorded tool results and failures on the active branch with bounded, redacted output tails. |
-| [Worker board](#worker-board) | `worker-board/index.ts` | `/workers [page\|hide]`, pinned widget | `tui`, `rpc` (with UI) | No | Shows live and last-recorded worker assignments, blockers, and outcomes from a parent `subagent` tool. |
+| [Trace](#trace) | `trace/index.ts` | `/trace [failed] [tool]` | `tui`, `rpc` (with UI) | No | Browses recorded tool results, sanitized call previews, nested `codemode` calls, and failures on the active branch with bounded, redacted output tails. |
+| [Worker board](#worker-board) | `worker-board/index.ts` | `/workers [page\|hide]`, auto-opened widget | `tui`, `rpc` (with UI) | No | Auto-opens on live worker/workflow runs (unless hidden) to show assignments, blockers, and outcomes from Pi's example `subagent` runner or `pi-subagents`. |
 
 ## Installation
 
@@ -37,6 +37,12 @@ To test individual extensions directly from a local checkout without installing 
 
 ```sh
 pi -e ./trace/index.ts -e ./worker-board/index.ts
+```
+
+To typecheck and lint a local checkout without installing `node_modules` (running `tsc --noEmit` against local `./node_modules` when present or the installed Pi release in `~/.pi/agent/install`, followed by `biome lint`):
+
+```sh
+npm run check
 ```
 
 ### Important notes
@@ -330,27 +336,30 @@ Displays local RTK token-savings totals in Pi's footer (for example `RTK: 12.4K 
 
 ```text
 /trace
+/trace bash
 /trace failed
 /trace failed bash
 ```
 
-Interactive browser for recorded `toolResult` messages on the active session branch—letting you inspect past tool outputs and failures without re-executing commands, spending tokens, or mutating the session.
+Interactive browser for recorded `toolResult` messages on the active session branch—letting you inspect past tool outputs, sanitized call previews, and nested `codemode` calls without re-executing commands, spending tokens, or mutating the session.
 
 ### Filtering and picker navigation
 
 - **Commands:**
   - `/trace` — lists all recorded `toolResult` entries on `ctx.sessionManager.getBranch()`, newest first (including entries recorded before compaction that remain on the branch).
-  - `/trace failed` — lists only entries where Pi recorded `msg.isError === true` (never guessing failure from output words or exit-code text).
-  - `/trace failed <tool>` — filters failed entries by exact `toolName` match (such as `bash`, `read`, `edit`, or an MCP tool name). Any other flag combination shows usage help.
-- **Paginated selector:** Displays **25 results per page** with `Older results →` and `← Newer results` navigation items. Each row shows only `<index>. ok|failed <tool> · <timestamp> · #<entryId>` (falling back to `?` / `#?` if a sanitized field is empty)—never raw shell commands or output lines in the picker list.
+  - `/trace <tool>` — filters entries by exact `toolName` match (such as `bash`, `read`, `edit`, `codemode`, or an MCP tool name), and also includes `codemode` entries whose `details.calls` invoked `<tool>`.
+  - `/trace failed` — lists entries where Pi recorded `msg.isError === true` or where a `codemode` entry recorded nested calls with `status` of `"error"` or `"cancelled"` (never guessing failure from output words or exit-code text).
+  - `/trace failed <tool>` — filters failed entries by exact `toolName` match, or `codemode` entries with a failed nested call to `<tool>`. Any other argument combination shows usage help.
+- **Paginated, persistent selector:** Displays **25 results per page** with `Older results →` and `← Newer results` navigation items. Each row shows `<index>. ok|failed|nested-err <tool> (<preview>) · <timestamp> · #<entryId>`, pairing `toolCallId` with sanitized `toolCall` previews (`command`, `path`, `file_path`, `pattern`, `query`, `url`, `action`, `agent`, `workflow`, or the first non-`// @options:` line of `code` via `displayLabel`, plus compact nested counts/tool hints like `[1/2 err]` or `[bash]` on `codemode` rows). Selecting an item shows diagnostics (`warning` for failed or `nested-err` entries, `info` otherwise) and keeps the picker open on the current page until you press `Esc` / cancel.
 - **Branch safety:** Switching branches (`session_tree`) or shutting down (`session_shutdown`) aborts an open `/trace` selector immediately, and selecting an entry re-verifies that the entry ID is still on the active branch before showing diagnostics.
 - Works in both interactive terminal (`tui`) mode and `rpc` clients that implement `ctx.ui.select` and `ctx.ui.notify`.
 
 ### Bounded diagnostics, redaction, and exclusions
 
+- **Nested `codemode` call summary:** When inspecting a `codemode` result with `details.calls`, Trace prepends a sanitized `[Nested calls]` summary (capped to the last **10** nested calls, showing status, tool name, truncated arguments, and truncated error text) ahead of the output tail so caught inner failures are visible immediately.
 - **Backward tail assembly:** Walks `content` text blocks from the end to collect at most **16,384 UTF-16 code units**. If the cut starts mid-block/mid-line, `displayTail` drops that partial leading line because its missing prefix could hide a credential label (such as `API_KEY=`).
 - **Sanitization (`shared/display.ts`):** Strips ANSI/VT escape sequences and Unicode control/format characters (preserving `\n` and `\t`), redacts common credential formats (PEM private keys, `Bearer`/`Basic` headers, `password`/`passwd`/`secret`/`token`/`api_key`/`access_key` assignments, signed URL query parameters, `sk-*` / `gh*_*` / `github_pat_*` / `AKIA*` tokens, and URL `user:pass@` userinfo), preserves UTF-16 surrogate pairs cleanly, and outputs at most the last **20 lines** and **4,000 UTF-16 code units** (marked with `[Last output only]` when truncated). Redaction is heuristic—diagnostics can still contain sensitive project data.
-- **What Trace never inspects:** User `!` interactive shell executions (`bashExecution` messages), nested sub-tool calls without their own parent-branch `toolResult` entry, image blocks, `details` payloads, and external full-output files referenced in truncation notices.
+- **What Trace never inspects:** User `!` interactive shell executions (`bashExecution` messages), image blocks, external full-output files referenced in truncation notices, `details` payloads other than `codemode`'s `details.calls` summary, and other nested sub-tool calls without their own parent-branch `toolResult` entry or `codemode` call record.
 
 ---
 
@@ -364,59 +373,38 @@ Interactive browser for recorded `toolResult` messages on the active session bra
 /workers hide
 ```
 
-Pins a compact, paginated status board above the editor showing delegated worker assignments, blockers, last used tools, and reported outcomes from the **parent session's `subagent` tool** (such as Pi 1.6's `examples/extensions/subagent/index.ts`).
+Pins a compact, paginated status board above the editor showing delegated worker assignments, blockers, last used tools, and reported outcomes from the **parent session's `subagent` tool** (supporting both Pi 1.6's `examples/extensions/subagent/index.ts` and `pi-subagents`).
 
 ### Setup and runner contract
 
 - Worker board is a passive UI observer—it does **not** bundle, install, or invoke a `subagent` runner, read external subagent transcript files, send agent messages, or make model calls. Without `subagent` calls on the active branch, opening `/workers` displays `No subagent calls on this branch.`
+- Delegated worker and workflow runs **auto-open** the board on page 1 at `tool_execution_start` unless hidden with `/workers hide` (which suppresses auto-open for the rest of the current batch and resets when the turn settles; standalone `management` actions do not auto-open a closed board). Use `/workers [page|hide]` anytime to reopen, paginate, or close the widget manually.
 - To try it with Pi's built-in example runner, load the runner alongside `worker-board` and define at least one agent under `~/.pi/agent/agents/` (see the runner's own README):
 
 ```sh
 pi -e "$PI_PACKAGE_ROOT/examples/extensions/subagent/index.ts" -e ./worker-board/index.ts
 ```
 
-- **Compatible `subagent` payload:** Top-level tool named `subagent` (`parentToolCallId === undefined`) emitting `details.mode` (`"single"`, `"parallel"`, or `"chain"`) and ordered `details.results` entries with `agent` (string) and `status`:
-  - Standard statuses from Pi's example runner: `"pending"`, `"running"`, `"completed"`, `"failed"`, `"aborted"`.
-  - Extended blocker support: `"blocked"` with an optional `"blocker"` string.
-  - Optional `messages` array on each worker result: scanned backward for the latest non-empty `toolResult.toolName` or assistant `toolCall.name` to display `last: <tool>`.
+- **Compatible `subagent` payloads:** Top-level tool named `subagent` (`parentToolCallId === undefined`) emitting `details.mode` (`"single"`, `"parallel"`, `"chain"`, `"workflow"`, or `"management"`) and `details.results`:
+  - **Worker entries (`details.results`):** Reads `agent` and `status` (`"pending"`, `"running"`, `"completed"`, `"failed"`, `"aborted"`, or `"blocked"` with optional `"blocker"`), or infers status for `pi-subagents` from numeric `exitCode` (`0` → `"completed"`, non-zero → `"failed"`) or `"running"` while live. Scans `messages` backward first and falls back to `toolCalls` (`{ text }`) for `last: <tool>`. Malformed worker slots render as `#<ref>/<slot> Unsupported worker report.`
+  - **Empty-`results` launches & actions (`pi-subagents`):** Renders `workflow` runs (using `workflowChildren.workflowState`, `args.workflow`, `args.mission`, and optional `async` tag), `asyncId` worker launches (`running (async)` while live, `last reported async` once settled), and `management` actions (`management:<action>` with optional `lifecycleStatus` / `steering` state). Other empty `results: []` calls (such as a declined confirmation prompt) report `No worker outcome reported.`
 
 ### Live batch tracking vs. persisted history
 
 - **Live execution (`Workers · current batch`):** Subscribes to `tool_execution_start`, `tool_execution_update`, and `tool_execution_end` for top-level `subagent` calls in the current turn, updating rows in place as partial results stream in. Each worker is addressed as `#<toolCallId>/<slot>`, keeping concurrent `subagent` calls and duplicate agent names distinct.
-- **Settled branch state (`Workers · last recorded batch`):** At `turn_start`, `agent_end`, and `session_tree`, clears transient live state and reconstructs the most recent assistant message containing `subagent` tool calls on `ctx.sessionManager.getBranch()` (matching the newest `toolResult` per `toolCallId` and referencing `#<entryId>/<slot>`). `session_shutdown` clears state and hides the widget.
-- **Honest historical state:** Any persisted non-live result still carrying `"running"` or `"pending"` is rendered as `last reported running` or `last reported pending` so a saved snapshot is never mistaken for a verified live OS process. Likewise, `completed` means the runner reported completion, not that tests or builds succeeded, and worker silence is never synthesized into `blocked`.
+- **Settled branch state (`Workers · last recorded batch`):** At `turn_start`, `agent_end`, and `session_tree`, clears transient live state, resets the batch `hidden` flag, and reconstructs the most recent assistant message containing `subagent` tool calls on `ctx.sessionManager.getBranch()` (matching the newest `toolResult` per `toolCallId` and referencing `#<entryId>/<slot>`). `session_shutdown` clears state and hides the widget.
+- **Honest historical state:** Any persisted non-live result still carrying `"running"`, `"pending"`, or an `asyncId` launch is rendered as `last reported running`, `last reported pending`, or `last reported async` so a saved snapshot is never mistaken for a verified live OS process. Likewise, `completed` means the runner reported completion, not that tests or builds succeeded, and worker silence is never synthesized into `blocked`.
 
 ### Sorting, pagination, layout, and privacy
 
 - **Priority order:** Rows sort by severity so failures and blockers never scroll below finished work:
   1. `blocked` and `failed` (including top-level call failures)
   2. `aborted` (and malformed/missing report notices)
-  3. `running`
+  3. `running` (including async and running workflow rows)
   4. `pending`
-  5. `completed`
+  5. `completed` (including completed workflow and management rows)
 - **Row format & two-line cap:** `<status> <agent> #<ref>/<slot> · blocked by: <blocker> · <task> · last: <tool>`. Pages show **6 workers per page** (`/workers <N>` jumps to page `N`; `/workers hide` closes the board). In `tui` mode, each line wraps and truncates to **at most two terminal lines** using width-aware ANSI wrapping; in `rpc` mode, the string array is passed to `ctx.ui.setWidget("worker-board", lines)`.
 - **Chain prompt safety & redaction:** In `"chain"` mode, `result.task` can contain a previous worker's entire expanded output, so Worker board reads assignment previews exclusively from the original `args.chain[i]` prompt template (only when `request.agent === raw.agent`) and sanitizes all labels through `shared/display.ts`. Assignment previews can still contain sensitive prompt text.
-
----
-
-## Testing and verification
-
-Run the extension test suites from the repository root with Node's built-in test runner (`node >= 22.19.0`):
-
-```sh
-# Extensions with zero runtime peer imports at test time:
-node --test shared/tests/*.test.ts phpstorm-mcp/tests/*.test.ts rtk-gain/tests/*.test.mjs trace/tests/*.test.mjs
-
-# Extensions that load @earendil-works/pi-* peers (point PI_PACKAGE_ROOT at your Pi install):
-PI_PACKAGE_ROOT="$HOME/.pi/agent/install/releases/1.6.0/node_modules/@earendil-works/pi-coding-agent" \
-  node --test git/tests/*.test.mjs worker-board/tests/*.test.mjs
-
-# RTK for other Pi tools (requires the rtk binary in PATH):
-PI_PACKAGE_ROOT="$HOME/.pi/agent/install/releases/1.6.0/node_modules/@earendil-works/pi-coding-agent" \
-  node --test rtk-pi-extended/tests/*.test.ts
-```
-
-Adjust the release version in `PI_PACKAGE_ROOT` to match your installed Pi release.
 
 ---
 

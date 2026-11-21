@@ -22,26 +22,37 @@ const PREVIEW_KEYS = [
 	"workflow",
 ] as const;
 
+interface NestedCall {
+	name: string;
+	args: string;
+	status: string;
+	error: string;
+}
+
 interface TraceItem {
 	id: string;
 	time: string;
 	msg: ToolResultMessage;
 	preview: string;
+	hasFailedNestedCall: boolean;
 }
 
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+	typeof v === "object" && v !== null && !Array.isArray(v);
+const isFailedCall = (c: NestedCall): boolean =>
+	c.status === "error" || c.status === "cancelled";
+
 export function callPreview(args: unknown): string {
-	if (typeof args !== "object" || args === null || Array.isArray(args))
-		return "";
-	const rec = args as Record<string, unknown>;
+	if (!isRecord(args)) return "";
 	for (const key of PREVIEW_KEYS) {
-		const val = rec[key];
+		const val = args[key];
 		if (typeof val !== "string") continue;
 		const label = displayLabel(val, 40);
 		if (label) return label;
 	}
-	if (typeof rec.code === "string") {
+	if (typeof args.code === "string") {
 		const line =
-			rec.code
+			args.code
 				.split(/\r?\n/u)
 				.find(
 					(l: string): boolean =>
@@ -52,8 +63,32 @@ export function callPreview(args: unknown): string {
 	return "";
 }
 
-function diagnostic(content: ToolResultMessage["content"]): string {
+export function codemodeCalls(msg: ToolResultMessage): NestedCall[] {
+	if (
+		msg.toolName !== "codemode" ||
+		!isRecord(msg.details) ||
+		!Array.isArray(msg.details.calls)
+	)
+		return [];
+	const out: NestedCall[] = [];
+	for (const raw of msg.details.calls) {
+		if (!isRecord(raw) || typeof raw.name !== "string" || !raw.name) continue;
+		out.push({
+			name: raw.name,
+			args: typeof raw.args === "string" ? raw.args : callPreview(raw.args),
+			status:
+				typeof raw.status === "string"
+					? displayLabel(raw.status, 16) || "unknown"
+					: "unknown",
+			error: typeof raw.error === "string" ? raw.error : "",
+		});
+	}
+	return out;
+}
+
+function diagnostic(msg: ToolResultMessage): string {
 	// Keep only a bounded text tail without loading referenced files or rendering images.
+	const { content } = msg;
 	let text = "";
 	let cut = false;
 	if (Array.isArray(content)) {
@@ -79,11 +114,24 @@ function diagnostic(content: ToolResultMessage["content"]): string {
 			}
 		}
 	}
-	return displayTail(
+	const tail = displayTail(
 		text,
 		cut,
 		"(No displayable text in the retained output.)",
 	);
+	const nested = codemodeCalls(msg);
+	if (!nested.length) return tail;
+	const lines = ["[Nested calls]"];
+	if (nested.length > 10) lines.push(`(Showing last 10 of ${nested.length})`);
+	for (const c of nested.slice(-10)) {
+		const name = displayLabel(c.name, 32) || "?";
+		const arg = c.args ? displayLabel(c.args, 40) : "";
+		const err = c.error ? displayLabel(c.error, 120) : "";
+		lines.push(
+			`- ${c.status} ${name}${arg ? ` (${arg})` : ""}${err ? `: ${err}` : ""}`,
+		);
+	}
+	return `${lines.join("\n")}\n\n${tail}`;
 }
 
 export default function trace(pi: ExtensionAPI): void {
@@ -127,17 +175,46 @@ export default function trace(pi: ExtensionAPI): void {
 					}
 					if (entry.message.role !== "toolResult") return [];
 					const msg = entry.message;
-					if (
+					const nested = codemodeCalls(msg);
+					const failedNested = nested.filter(isFailedCall).length;
+					const hasFailedNestedCall = failedNested > 0;
+					if (nested.length > 0) {
+						const directMatch =
+							(!failedOnly || msg.isError === true || hasFailedNestedCall) &&
+							(!tool || tool === "codemode");
+						const nestedMatch =
+							Boolean(tool && tool !== "codemode") &&
+							nested.some(
+								(c: NestedCall): boolean =>
+									c.name === tool && (!failedOnly || isFailedCall(c)),
+							);
+						if (!directMatch && !nestedMatch) return [];
+					} else if (
 						(failedOnly && msg.isError !== true) ||
 						(tool && msg.toolName !== tool)
-					)
+					) {
 						return [];
+					}
+					const nestedTool =
+						tool && tool !== "codemode" ? displayLabel(tool, 24) : "";
+					const hint =
+						nested.length > 0 && (failedNested > 0 || nestedTool)
+							? failedNested > 0 && nestedTool
+								? `[${nestedTool} ${failedNested}/${nested.length} err]`
+								: failedNested > 0
+									? `[${failedNested}/${nested.length} err]`
+									: `[${nestedTool}]`
+							: "";
+					const preview = [hint, callPreview(calls.get(msg.toolCallId))]
+						.filter(Boolean)
+						.join(" ");
 					return [
 						{
 							id: entry.id,
 							time: entry.timestamp,
 							msg,
-							preview: callPreview(calls.get(msg.toolCallId)),
+							preview,
+							hasFailedNestedCall,
 						},
 					];
 				})
@@ -151,8 +228,17 @@ export default function trace(pi: ExtensionAPI): void {
 			for (;;) {
 				const page = results.slice(offset, offset + PAGE_SIZE);
 				const labels = page.map(
-					({ id, time, msg, preview }: TraceItem, i: number): string =>
-						`${offset + i + 1}. ${msg.isError ? "failed" : "ok"} ${displayLabel(msg.toolName, 64) || "?"}${preview ? ` (${preview})` : ""} · ${displayLabel(time, 32) || "?"} · #${displayLabel(id, 36) || "?"}`,
+					(
+						{ id, time, msg, preview, hasFailedNestedCall }: TraceItem,
+						i: number,
+					): string => {
+						const status = msg.isError
+							? "failed"
+							: hasFailedNestedCall
+								? "nested-err"
+								: "ok";
+						return `${offset + i + 1}. ${status} ${displayLabel(msg.toolName, 64) || "?"}${preview ? ` (${preview})` : ""} · ${displayLabel(time, 32) || "?"} · #${displayLabel(id, 36) || "?"}`;
+					},
 				);
 				const options = [...labels];
 				if (offset) options.push(NEWER);
@@ -180,8 +266,10 @@ export default function trace(pi: ExtensionAPI): void {
 						return;
 					}
 					ctx.ui.notify(
-						`${pick}\n${diagnostic(selected.msg.content)}`,
-						selected.msg.isError ? "warning" : "info",
+						`${pick}\n${diagnostic(selected.msg)}`,
+						selected.msg.isError || selected.hasFailedNestedCall
+							? "warning"
+							: "info",
 					);
 				}
 			}
