@@ -8,7 +8,10 @@ import type {
 	TurnEndEvent,
 	TurnEndEventResult,
 } from "@earendil-works/pi-coding-agent";
-import { resolveExecutable } from "../shared/executable.ts";
+import {
+	isMissingBinaryError,
+	resolveExecutable,
+} from "../shared/executable.ts";
 import { bindSession, type SessionSnapshot } from "../shared/session.ts";
 import { type Failure, filterPosthook, type Result } from "./bridge.ts";
 import {
@@ -32,7 +35,6 @@ import { type Dependencies, type Processed, processRoute } from "./process.ts";
 import { resolvePath } from "./views.ts";
 
 const REWRITE_TIMEOUT_MS = 2_000;
-const MISSING_RTK = /^spawn\b.*\bENOENT\b/;
 
 const FAILURE_MESSAGES: Record<Failure, string> = {
 	unavailable: "rtk was not found in PATH",
@@ -234,7 +236,7 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 					signal,
 				});
 				if (signal.aborted || result.killed) return undefined;
-				if (!result.stdout && MISSING_RTK.test(result.stderr)) {
+				if (isMissingBinaryError(result)) {
 					unavailable = true;
 					return undefined;
 				}

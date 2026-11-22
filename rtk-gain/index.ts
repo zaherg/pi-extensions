@@ -6,7 +6,10 @@ import type {
 	SessionStartEvent,
 	TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
-import { resolveExecutable } from "../shared/executable.ts";
+import {
+	isMissingBinaryError,
+	resolveExecutable,
+} from "../shared/executable.ts";
 import {
 	bindSession,
 	type NotifyLevel,
@@ -184,8 +187,7 @@ export default function rtkGain(pi: ExtensionAPI): void {
 		if (result.truncated) return `${command} output exceeded 1 MiB`;
 		if (result.killed) return `${command} was interrupted or timed out`;
 		if (result.code !== 0) {
-			if (!result.stdout && /^spawn\b.*\bENOENT\b/.test(result.stderr))
-				return `${command} not found`;
+			if (isMissingBinaryError(result)) return `${command} not found`;
 			return onExit
 				? onExit(result.code)
 				: `${command} exited with code ${result.code}`;

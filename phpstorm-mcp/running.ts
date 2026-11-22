@@ -1,5 +1,6 @@
 import { win32 } from "node:path";
 import type { ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { resolveExecutable } from "../shared/executable.ts";
 
 // Query registered GUI applications (release and EAP) rather than leftover stdioMcpServer processes.
 const macQuery = `
@@ -28,7 +29,6 @@ function queryError(reason: string): Error {
 	);
 }
 
-// Resolve System32 PowerShell directly so Windows never runs a powershell.exe from cwd.
 export function windowsPowerShell(
 	env: NodeJS.ProcessEnv = process.env,
 ): string {
@@ -61,7 +61,7 @@ export async function isPhpStormRunning(
 			args = ["-l", "JavaScript", "-e", macQuery];
 			break;
 		case "linux":
-			command = "ps";
+			command = resolveExecutable("ps", "linux", env) ?? "/bin/ps";
 			args = ["-Aww", "-o", "comm=", "-o", "args="];
 			break;
 		case "win32":
@@ -87,7 +87,6 @@ export async function isPhpStormRunning(
 		});
 	} catch {
 		if (signal?.aborted) return false;
-		// Suppress raw child-process errors that could expose private process arguments.
 		throw queryError("could not execute process query");
 	}
 	if (signal?.aborted) return false;

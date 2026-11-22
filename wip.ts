@@ -1,8 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { resolveExecutable } from "./shared/executable.ts";
+import {
+	isMissingBinaryError,
+	resolveExecutable,
+} from "./shared/executable.ts";
 import { bindSession, type SessionSnapshot } from "./shared/session.ts";
-
-const MISSING_BINARY_RE = /^spawn\b.*\bENOENT\b/i;
 
 export default function wipExtension(pi: ExtensionAPI): void {
 	const session = bindSession(pi);
@@ -60,11 +61,7 @@ export default function wipExtension(pi: ExtensionAPI): void {
 					});
 					if (result.code !== 0 || result.killed) {
 						if (signal.aborted) return;
-						if (
-							!result.killed &&
-							!result.stdout &&
-							MISSING_BINARY_RE.test(result.stderr)
-						) {
+						if (isMissingBinaryError(result)) {
 							snap.notify("git was not found on PATH.", "error");
 							return;
 						}

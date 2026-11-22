@@ -131,6 +131,29 @@ function defaultConfig(home: string): McpServerConfig {
 	};
 }
 
+function writeExclusiveFileViaHardLink(
+	targetPath: string,
+	content: string,
+): void {
+	const dir = dirname(targetPath);
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	const tempPath = join(
+		dir,
+		`.pi-phpstorm-mcp.${process.pid}.${randomUUID()}.tmp`,
+	);
+	try {
+		writeFileSync(tempPath, content, {
+			flag: "wx",
+			mode: 0o600,
+		});
+		linkSync(tempPath, targetPath);
+	} finally {
+		try {
+			unlinkSync(tempPath);
+		} catch {}
+	}
+}
+
 function loadOrCreateConfig(configPath: string, home: string): McpServerConfig {
 	try {
 		return readConfig(configPath);
@@ -144,25 +167,12 @@ function loadOrCreateConfig(configPath: string, home: string): McpServerConfig {
 	}
 
 	const config = defaultConfig(home);
-	const dir = dirname(configPath);
 	try {
-		mkdirSync(dir, { recursive: true, mode: 0o700 });
-		const tempPath = join(
-			dir,
-			`.pi-phpstorm-mcp.${process.pid}.${randomUUID()}.tmp`,
+		writeExclusiveFileViaHardLink(
+			configPath,
+			`${JSON.stringify(config, null, 2)}\n`,
 		);
-		try {
-			writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, {
-				flag: "wx",
-				mode: 0o600,
-			});
-			linkSync(tempPath, configPath);
-			return config;
-		} finally {
-			try {
-				unlinkSync(tempPath);
-			} catch {}
-		}
+		return config;
 	} catch (cause: unknown) {
 		if (isErrno(cause, "EEXIST")) {
 			try {

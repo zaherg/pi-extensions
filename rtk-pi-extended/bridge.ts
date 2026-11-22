@@ -27,7 +27,6 @@ export type Failure = (typeof FAILURES)[number];
 export interface ProcessOptions {
 	configDirectory: string;
 	signal?: AbortSignal | undefined;
-	// Allow process overrides for isolated checks without exposing them to pipeline configs.
 	executable?: string | undefined;
 	env?: NodeJS.ProcessEnv | undefined;
 	timeoutMs?: number | undefined;
@@ -43,7 +42,6 @@ export type Result =
 	| { kind: "filtered"; text: string }
 	| { kind: "failed"; reason: Failure };
 
-/** Spawn RTK and pass input over stdin without invoking a shell. */
 export async function invokeRtk(
 	args: string[],
 	input: string,
@@ -55,8 +53,11 @@ export async function invokeRtk(
 		return { ok: false, reason: "input-limit" };
 	}
 
-	// Resolve bare executables from PATH so Windows never runs an rtk.exe from cwd.
-	const executable = resolveExecutable(options.executable ?? "rtk");
+	const executable = resolveExecutable(
+		options.executable ?? "rtk",
+		process.platform,
+		options.env ?? process.env,
+	);
 	if (!executable) return { ok: false, reason: "unavailable" };
 
 	return new Promise<ProcessResult>((resolve) => {
@@ -131,14 +132,12 @@ export async function invokeRtk(
 			else if (stdout && !failure) output.push(chunk);
 		};
 		child.stdout.on("data", (chunk: Buffer): void => collect(chunk, true));
-		// Count stderr toward the byte limit without exposing its contents.
 		child.stderr.on("data", (chunk: Buffer): void => collect(chunk, false));
 		child.on("close", (code: number | null): void => {
 			if (failure || code !== 0) {
 				finish({ ok: false, reason: failure ?? "process" });
 			} else {
 				try {
-					// Decode UTF-8 strictly so corrupted recall bytes cannot compare equal.
 					const stdout = new TextDecoder("utf-8", {
 						fatal: true,
 						ignoreBOM: true,
@@ -205,7 +204,6 @@ export function preservesBoundaries(
 	return true;
 }
 
-/** Predicate checking whether a filtered RTK output preserved required structural lines. */
 export type StructureCheck = (original: string, filtered: string) => boolean;
 
 /** Run one text result through RTK's post-tool pipeline and verify recall integrity. */
@@ -226,7 +224,6 @@ export async function filterPosthook(
 		JSON.stringify({
 			hook_event_name: "PostToolUse",
 			tool_name: toolName,
-			// Omit tool inputs so prompts and metadata are never forwarded to RTK.
 			tool_input: {},
 			tool_response: { content: [{ type: "text", text }] },
 		}),
@@ -248,10 +245,8 @@ export async function filterPosthook(
 		return { kind: "failed", reason: "boundaries" };
 	}
 
-	// Require a valid recall hash before accepting lossy output.
 	const hash = RECALL_HINT.exec(filtered)?.[1];
 	if (!hash) return { kind: "failed", reason: "recovery" };
-	// Force a recall readback when requested or when the original text could contain the hash.
 	if (
 		verifyRecall ||
 		RECALL_HINT.test(text) ||

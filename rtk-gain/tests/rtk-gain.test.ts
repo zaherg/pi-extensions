@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
+import { after, before, describe, it } from "node:test";
 import type {
 	ExecResult,
 	ExtensionAPI,
@@ -7,6 +10,31 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import rtkGain from "../index.ts";
+
+let stubBinDir: string | undefined;
+let previousPath: string | undefined;
+
+before(() => {
+	stubBinDir = mkdtempSync(join(tmpdir(), "pi-rtk-gain-bin-"));
+	for (const tool of ["rtk", "sbx"]) {
+		const stub = join(
+			stubBinDir,
+			process.platform === "win32" ? `${tool}.exe` : tool,
+		);
+		writeFileSync(stub, "#!/bin/sh\n");
+		if (process.platform !== "win32") chmodSync(stub, 0o755);
+	}
+	previousPath = process.env.PATH;
+	process.env.PATH = previousPath
+		? `${stubBinDir}${delimiter}${previousPath}`
+		: stubBinDir;
+});
+
+after(() => {
+	if (previousPath === undefined) delete process.env.PATH;
+	else process.env.PATH = previousPath;
+	if (stubBinDir) rmSync(stubBinDir, { recursive: true, force: true });
+});
 
 function makeExec(
 	stdout = "",
@@ -122,7 +150,7 @@ describe("rtk-gain", () => {
 
 	it("aggregates host + running sandboxes in /rtk-gain all and skips stopped or invalid sandboxes", async () => {
 		const h = createHarness(async (command, args) => {
-			if (command.endsWith("rtk"))
+			if (command.endsWith("rtk") || command.endsWith("rtk.exe"))
 				return makeExec(gainJson(10, 1000, 400, 600));
 			if (args[1] === "ls") {
 				return makeExec(
@@ -150,7 +178,8 @@ describe("rtk-gain", () => {
 
 		// Rejects unsafe sandbox names (path traversal) without running sbx exec
 		const unsafe = createHarness(async (command) => {
-			if (command.endsWith("rtk")) return makeExec(gainJson(1, 100, 50, 50));
+			if (command.endsWith("rtk") || command.endsWith("rtk.exe"))
+				return makeExec(gainJson(1, 100, 50, 50));
 			return makeExec(
 				JSON.stringify([{ name: "../escape", status: "running" }]),
 			);
