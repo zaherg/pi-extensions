@@ -417,6 +417,43 @@ async function readDocument(
 	}
 }
 
+async function releaseLock(
+	handle: FileHandle,
+	lockPath: string,
+): Promise<void> {
+	let owned: Stats;
+	try {
+		owned = await handle.stat();
+	} finally {
+		await handle.close();
+	}
+	let current: Stats;
+	try {
+		current = await lstat(lockPath);
+	} catch (lockErr: unknown) {
+		if (errno(lockErr, "ENOENT"))
+			fail(
+				"LOCK_CHANGED",
+				"Progress lock was removed while held; re-read progress before retrying.",
+			);
+		throw lockErr;
+	}
+	if (current.ino !== owned.ino || current.dev !== owned.dev)
+		fail(
+			"LOCK_CHANGED",
+			"Progress lock changed while held. The replacement lock was left untouched; re-read progress before retrying.",
+		);
+	try {
+		await unlink(lockPath);
+	} catch (unlinkErr: unknown) {
+		if (errno(unlinkErr, "ENOENT"))
+			fail(
+				"LOCK_CHANGED",
+				"Progress lock was removed while held; re-read progress before retrying.",
+			);
+		throw unlinkErr;
+	}
+}
 async function withLock<T>(
 	location: Location,
 	signal: AbortSignal | undefined,
@@ -439,6 +476,11 @@ async function withLock<T>(
 			await delay(25, undefined, { signal });
 		}
 	}
+	let result!: T;
+	let primaryError: unknown;
+	let hasPrimaryError = false;
+	let cleanupError: unknown;
+	let hasCleanupError = false;
 	try {
 		await handle.writeFile(
 			`${JSON.stringify({
@@ -448,22 +490,21 @@ async function withLock<T>(
 			})}\n`,
 		);
 		signal?.throwIfAborted();
-		return await operation();
+		result = await operation();
+	} catch (error: unknown) {
+		primaryError = error;
+		hasPrimaryError = true;
 	} finally {
-		let owned: Stats;
 		try {
-			owned = await handle.stat();
-		} finally {
-			await handle.close();
+			await releaseLock(handle, lockPath);
+		} catch (error: unknown) {
+			cleanupError = error;
+			hasCleanupError = true;
 		}
-		const current = await lstat(lockPath);
-		if (current.ino !== owned.ino || current.dev !== owned.dev)
-			fail(
-				"LOCK_CHANGED",
-				"Progress lock changed while held. The replacement lock was left untouched; re-read progress before retrying.",
-			);
-		await unlink(lockPath);
 	}
+	if (hasPrimaryError) throw primaryError;
+	if (hasCleanupError) throw cleanupError;
+	return result;
 }
 async function persist(
 	location: Location,
@@ -495,7 +536,7 @@ async function persist(
 			);
 		throw error;
 	} finally {
-		if (!committed) await unlink(temporary);
+		if (!committed) await unlink(temporary).catch(() => {});
 	}
 }
 function newStep(description: string): Step {
@@ -556,9 +597,19 @@ function apply(
 	advanceRevision(document);
 }
 
+function validateMerged(candidate: unknown, project: string): ProgressDocument {
+	try {
+		return parseDocument(candidate, project);
+	} catch (error: unknown) {
+		if (error instanceof ProgressError && error.code === "INVALID_DOCUMENT")
+			throw new ProgressError("INVALID_PROPOSAL", error.message);
+		throw error;
+	}
+}
+
 // Merge task patches without deleting or reordering records, then revalidate the document.
 function mergeUpdates(document: ProgressDocument, updates: unknown): ProgressDocument {
-	const code: ProgressErrorCode = "INVALID_REQUEST";
+	const code: ProgressErrorCode = "INVALID_PROPOSAL";
 	if (!Array.isArray(updates)) fail(code, "Expected a task updates array.");
 	const tasks = structuredClone(document.tasks);
 	const seen = new Set<string>();
@@ -589,7 +640,7 @@ function mergeUpdates(document: ProgressDocument, updates: unknown): ProgressDoc
 			if (stepIndex === -1) steps.push(replacement);
 			else steps[stepIndex] = replacement;
 		}
-		const validated = parseDocument(
+		const validated = validateMerged(
 			{ ...document, tasks: [{ ...patch, id, steps }] },
 			document.project,
 		).tasks[0];
@@ -597,7 +648,7 @@ function mergeUpdates(document: ProgressDocument, updates: unknown): ProgressDoc
 		if (index === -1) tasks.push(validated);
 		else tasks[index] = validated;
 	}
-	return parseDocument({ ...document, tasks }, document.project);
+	return validateMerged({ ...document, tasks }, document.project);
 }
 
 /** Commit a background proposal atomically without extending the public CLI protocol. */

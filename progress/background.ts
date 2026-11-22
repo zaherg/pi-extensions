@@ -125,7 +125,7 @@ export function projectConversation(entries: readonly SessionEntry[]): Conversat
 	let truncated = false;
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		if (!entry || entry.type !== "message") continue;
+		if (entry?.type !== "message") continue;
 		const message = entry.message;
 		if (message.role !== "user" && message.role !== "assistant") continue;
 		if (message.role === "assistant" && message.stopReason !== "stop") continue;
@@ -279,14 +279,26 @@ export function createProgressUpdater(
 					"The background model request failed. Check the configured provider and authentication; no fallback was attempted.",
 				);
 			}
-			if (sameSession(job))
+			abort.signal.throwIfAborted();
+			if (response.stopReason === "aborted") return;
+			if (response.stopReason === "error")
+				throw new ProgressError(
+					"MODEL_FAILED",
+					"The background model request failed. Check the configured provider and authentication; no fallback was attempted.",
+				);
+			if (
+				sameSession(job) &&
+				(response.stopReason === "stop" ||
+					response.usage.input > 0 ||
+					response.usage.output > 0 ||
+					response.usage.totalTokens > 0)
+			)
 				host.appendEntry<ProgressUsageEntry>("progress-usage", {
 					provider: model.provider,
 					model: model.id,
 					usage: response.usage,
 				});
 			if (!current(job)) return;
-			abort.signal.throwIfAborted();
 			if (response.stopReason !== "stop")
 				throw new ProgressError(
 					"MODEL_FAILED",
