@@ -1,19 +1,25 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import {
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	statSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { homedir, tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import {
 	createAgentSession,
 	createMcpExtension,
 	DefaultResourceLoader,
+	type ExecResult,
 	type ExtensionAPI,
 	type ExtensionError,
 	getPackageDir,
@@ -23,6 +29,7 @@ import {
 	SettingsManager,
 	wrapRegisteredTool,
 } from "@earendil-works/pi-coding-agent";
+import { isPhpStormRunning } from "../phpstorm-mcp/running.ts";
 import { filterPosthook } from "../rtk-pi-extended/bridge.ts";
 import { structureCheck } from "../rtk-pi-extended/policy.ts";
 import { resolveExecutable } from "../shared/executable.ts";
@@ -83,6 +90,33 @@ function createTempGitRepo(
 		stdio: "pipe",
 	});
 	return repo;
+}
+
+function hostExec(
+	command: string,
+	args: string[],
+	options?: { timeout?: number; maxBuffer?: number },
+): Promise<ExecResult> {
+	return new Promise((resolveResult, rejectResult) => {
+		execFile(
+			command,
+			args,
+			{ timeout: options?.timeout, maxBuffer: options?.maxBuffer },
+			(error, stdout, stderr) => {
+				if (error && typeof error.code !== "number") {
+					rejectResult(error);
+					return;
+				}
+				resolveResult({
+					stdout: String(stdout),
+					stderr: String(stderr),
+					code: error && typeof error.code === "number" ? error.code : 0,
+					killed: Boolean(error?.killed),
+					truncated: false,
+				});
+			},
+		);
+	});
 }
 
 describe("Pi 1.6 real harness integration", () => {
@@ -792,4 +826,417 @@ finally:
 			);
 		},
 	);
+
+	it("runs progress background updater end-to-end through real ModelRegistry.streamSimple over loopback HTTP SSE", async () => {
+		const proposal = JSON.stringify({
+			tasks: [
+				{
+					id: null,
+					title: "Live streamSimple task",
+					description:
+						"Created by real progress background updater over HTTP SSE",
+					steps: [
+						{
+							id: null,
+							description: "Verify end-to-end streamSimple",
+							status: "completed",
+							blocked_by: null,
+						},
+					],
+				},
+			],
+		});
+
+		const receivedBodies: string[] = [];
+		const server = createServer((req, res) => {
+			let body = "";
+			req.on("data", (chunk: Buffer) => {
+				body += chunk.toString("utf8");
+			});
+			req.on("end", () => {
+				receivedBodies.push(body);
+				res.writeHead(200, {
+					"content-type": "text/event-stream",
+					"cache-control": "no-cache",
+				});
+				const now = Math.floor(Date.now() / 1000);
+				const chunk1 = {
+					id: "chatcmpl-progress-1",
+					object: "chat.completion.chunk",
+					created: now,
+					model: "progress-test",
+					choices: [
+						{
+							index: 0,
+							delta: { role: "assistant", content: proposal },
+							finish_reason: null,
+						},
+					],
+				};
+				const chunk2 = {
+					id: "chatcmpl-progress-1",
+					object: "chat.completion.chunk",
+					created: now,
+					model: "progress-test",
+					choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+					usage: {
+						prompt_tokens: 42,
+						completion_tokens: 18,
+						total_tokens: 60,
+					},
+				};
+				res.write(`data: ${JSON.stringify(chunk1)}\n\n`);
+				res.write(`data: ${JSON.stringify(chunk2)}\n\n`);
+				res.write("data: [DONE]\n\n");
+				res.end();
+			});
+		});
+
+		await new Promise<void>((resolveListen) =>
+			server.listen(0, "127.0.0.1", () => resolveListen()),
+		);
+		const { port } = server.address() as AddressInfo;
+		const tmp = mkdtempSync(join(tmpdir(), "pi-bg-sse-"));
+		tempDirs.push(tmp);
+		const prevHome = process.env.HOME;
+		process.env.HOME = tmp;
+
+		try {
+			const agentDir = join(tmp, "agent");
+			const settingsManager = SettingsManager.inMemory({
+				defaultProvider: "local-sse",
+				defaultModel: "progress-test",
+			});
+			const loader = new DefaultResourceLoader({
+				cwd: tmp,
+				agentDir,
+				settingsManager,
+				noExtensions: true,
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				noContextFiles: true,
+				additionalExtensionPaths: [resolve("progress/index.ts")],
+			});
+			await loader.reload();
+
+			const sessionManager = SessionManager.inMemory(tmp);
+			const { session, extensionsResult } = await createAgentSession({
+				cwd: tmp,
+				agentDir,
+				resourceLoader: loader,
+				sessionManager,
+				settingsManager,
+				noTools: "builtin",
+			});
+			const runtimeErrors: ExtensionError[] = [];
+			try {
+				assert.deepEqual(extensionsResult.errors, []);
+				await session.bindExtensions({
+					onError: (err: ExtensionError) => runtimeErrors.push(err),
+				});
+				const runner = session.extensionRunner;
+				assert.ok(runner);
+				runner.createContext().modelRegistry.registerProvider("local-sse", {
+					baseUrl: `http://127.0.0.1:${port}/v1`,
+					apiKey: "test-key",
+					api: "openai-completions",
+					models: [
+						{
+							id: "progress-test",
+							name: "Progress Test",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128000,
+							maxTokens: 4096,
+						},
+					],
+				});
+
+				const progressCmd = runner.getCommand("progress");
+				assert.ok(progressCmd);
+				await progressCmd.handler("start", runner.createCommandContext());
+				sessionManager.appendMessage({
+					role: "user",
+					content: "Please verify streamSimple end-to-end.",
+					timestamp: Date.now(),
+				});
+				sessionManager.appendMessage({
+					role: "assistant",
+					content: [
+						{ type: "text", text: "Verified streamSimple end-to-end." },
+					],
+					api: "openai-completions",
+					provider: "local-sse",
+					model: "progress-test",
+					usage: {
+						input: 10,
+						output: 5,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 15,
+						cost: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							total: 0,
+						},
+					},
+					stopReason: "stop",
+					timestamp: Date.now(),
+				});
+
+				await runner.emit({ type: "agent_settled", aborted: false });
+				// Quit shutdown drains the in-flight background HTTP SSE update cleanly.
+				await runner.emit({ type: "session_shutdown", reason: "quit" });
+
+				assert.equal(receivedBodies.length, 1);
+				assert.ok(
+					receivedBodies[0]?.includes("Verify streamSimple") ||
+						receivedBodies[0]?.includes(
+							"Please verify streamSimple end-to-end.",
+						),
+				);
+
+				const savedPath = join(
+					tmp,
+					".config",
+					"ai-sessions",
+					basename(tmp),
+					"progress.json",
+				);
+				const saved = JSON.parse(readFileSync(savedPath, "utf8")) as {
+					revision: number;
+					tasks: Array<{
+						title: string;
+						steps: Array<{ status: string | null }>;
+					}>;
+				};
+				assert.equal(saved.revision, 1);
+				assert.equal(saved.tasks.length, 1);
+				assert.equal(saved.tasks[0]?.title, "Live streamSimple task");
+				assert.equal(saved.tasks[0]?.steps[0]?.status, "completed");
+
+				const usageEntries = sessionManager
+					.getEntries()
+					.filter(
+						(e) => e.type === "custom" && e.customType === "progress-usage",
+					);
+				assert.equal(usageEntries.length, 1);
+				const usageEntry = usageEntries[0];
+				assert.ok(usageEntry && usageEntry.type === "custom");
+				const usageData = usageEntry.data as {
+					provider: string;
+					model: string;
+					usage: { input: number; output: number; totalTokens: number };
+				};
+				assert.equal(usageData.provider, "local-sse");
+				assert.equal(usageData.model, "progress-test");
+				assert.equal(usageData.usage.input, 42);
+				assert.equal(usageData.usage.output, 18);
+				assert.equal(usageData.usage.totalTokens, 60);
+
+				const projected = sessionManager.buildSessionContext();
+				assert.ok(
+					!JSON.stringify(projected.messages).includes("progress-usage"),
+					"progress-usage CustomEntry must never leak into LLM context",
+				);
+
+				// Verify the persisted background update is reflected in before_agent_start.
+				const beforeNext = await runner.emitBeforeAgentStart(
+					{ messageType: "user", prompt: "status?" },
+					{
+						cwd: tmp,
+						selectedTools: ["progress"],
+						toolSnippets: {},
+						promptGuidelines: [],
+						contextFiles: [],
+						skills: [],
+					},
+				);
+				assert.equal(beforeNext.messages.length, 1);
+				assert.ok(
+					typeof beforeNext.messages[0]?.content === "string" &&
+						beforeNext.messages[0].content.includes(
+							"1 tasks; 1/1 steps completed; 0 blocked; revision 1.",
+						),
+				);
+				assert.deepEqual(runtimeErrors, []);
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			if (prevHome === undefined) delete process.env.HOME;
+			else process.env.HOME = prevHome;
+			await new Promise<void>((resolveClose) =>
+				server.close(() => resolveClose()),
+			);
+		}
+	});
+
+	it("connects phpstorm-mcp live to the running PhpStorm IDE through real createMcpExtension and invokes a real MCP tool", async (t) => {
+		const realHome = homedir();
+		const phpstormBin = join(
+			realHome,
+			"Applications",
+			"PhpStorm.app",
+			"Contents",
+			"MacOS",
+			"phpstorm",
+		);
+		let running = false;
+		if (process.platform === "darwin" && existsSync(phpstormBin)) {
+			try {
+				running = await isPhpStormRunning({ exec: hostExec });
+			} catch {
+				running = false;
+			}
+		}
+		if (!running) {
+			t.skip("PhpStorm IDE is not currently running on this host");
+			return;
+		}
+
+		const tmp = mkdtempSync(join(tmpdir(), "pi-phpstorm-live-"));
+		tempDirs.push(tmp);
+		symlinkSync(join(realHome, "Applications"), join(tmp, "Applications"));
+		const prevHome = process.env.HOME;
+		process.env.HOME = tmp;
+
+		try {
+			const agentDir = join(tmp, ".pi", "agent");
+			mkdirSync(agentDir, { recursive: true });
+			const cfgPath = join(agentDir, "pi-phpstorm-mcp.json");
+
+			// 1. Negative contract check: even while PhpStorm is running, TUI mode must NOT register MCP or write config.
+			{
+				const mcpExt = createMcpExtension({
+					loadConfig: () => ({ servers: [], errors: [] }),
+					startupWaitMs: 500,
+				});
+				const loader = new DefaultResourceLoader({
+					cwd: resolve("."),
+					agentDir,
+					settingsManager: SettingsManager.inMemory(),
+					noExtensions: true,
+					noSkills: true,
+					noPromptTemplates: true,
+					noThemes: true,
+					noContextFiles: true,
+					extensionFactories: [mcpExt],
+					additionalExtensionPaths: [resolve("phpstorm-mcp/index.ts")],
+				});
+				await loader.reload();
+				const { session } = await createAgentSession({
+					cwd: resolve("."),
+					agentDir,
+					resourceLoader: loader,
+					sessionManager: SessionManager.inMemory(resolve(".")),
+					settingsManager: SettingsManager.inMemory(),
+					noTools: "builtin",
+				});
+				let runner: typeof session.extensionRunner | undefined;
+				try {
+					await session.bindExtensions({ mode: "tui" });
+					runner = session.extensionRunner;
+					await new Promise((r) => setTimeout(r, 200));
+					assert.equal(existsSync(cfgPath), false);
+					assert.equal(
+						runner
+							?.getAllRegisteredTools()
+							.filter((tool) =>
+								tool.definition.name.startsWith("mcp__phpstorm__"),
+							).length ?? 0,
+						0,
+					);
+				} finally {
+					if (runner) await runner.emit({ type: "session_shutdown", reason: "quit" });
+					await session.dispose();
+				}
+			}
+
+			// 2. Positive live E2E check: RPC mode detects PhpStorm, writes 0o600 config, connects via stdioMcpServer,
+			//    discovers real PhpStorm MCP tools, executes a read-only tool call, and shuts down cleanly.
+			const mcpExt = createMcpExtension({
+				loadConfig: () => ({ servers: [], errors: [] }),
+				startupWaitMs: 5_000,
+			});
+			const loader = new DefaultResourceLoader({
+				cwd: resolve("."),
+				agentDir,
+				settingsManager: SettingsManager.inMemory(),
+				noExtensions: true,
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				noContextFiles: true,
+				extensionFactories: [mcpExt],
+				additionalExtensionPaths: [resolve("phpstorm-mcp/index.ts")],
+			});
+			await loader.reload();
+			const { session, extensionsResult } = await createAgentSession({
+				cwd: resolve("."),
+				agentDir,
+				resourceLoader: loader,
+				sessionManager: SessionManager.inMemory(resolve(".")),
+				settingsManager: SettingsManager.inMemory(),
+				noTools: "builtin",
+			});
+
+			const runtimeErrors: ExtensionError[] = [];
+			let runner: typeof session.extensionRunner | undefined;
+			try {
+				assert.deepEqual(extensionsResult.errors, []);
+				await session.bindExtensions({
+					mode: "rpc",
+					onError: (err: ExtensionError) => runtimeErrors.push(err),
+				});
+				runner = session.extensionRunner;
+				assert.ok(runner);
+
+				let phpstormTools = runner
+					.getAllRegisteredTools()
+					.filter((tool) => tool.definition.name.startsWith("mcp__phpstorm__"));
+				const deadline = Date.now() + 8_000;
+				while (phpstormTools.length === 0 && Date.now() < deadline) {
+					await new Promise((r) => setTimeout(r, 150));
+					phpstormTools = runner
+						.getAllRegisteredTools()
+						.filter((tool) =>
+							tool.definition.name.startsWith("mcp__phpstorm__"),
+						);
+				}
+
+				assert.equal(existsSync(cfgPath), true);
+				assert.equal(statSync(cfgPath).mode & 0o777, 0o600);
+				assert.ok(
+					phpstormTools.length > 0,
+					"expected live PhpStorm IDE to expose mcp__phpstorm__* tools",
+				);
+
+				const readOnlyTool =
+					phpstormTools.find(
+						(tool) =>
+							tool.definition.name === "mcp__phpstorm__get_all_open_file_paths",
+					) ?? phpstormTools[0];
+				assert.ok(readOnlyTool);
+				const wrapped = wrapRegisteredTool(readOnlyTool, runner);
+				const toolResult = await wrapped.execute("live-phpstorm-1", {});
+				assert.ok(
+					Array.isArray(toolResult.content) && toolResult.content.length > 0,
+					"expected non-empty MCP response from live PhpStorm IDE",
+				);
+				assert.deepEqual(runtimeErrors, []);
+			} finally {
+				if (runner)
+					await runner.emit({ type: "session_shutdown", reason: "quit" });
+				await session.dispose();
+			}
+		} finally {
+			if (prevHome === undefined) delete process.env.HOME;
+			else process.env.HOME = prevHome;
+		}
+	});
 });
