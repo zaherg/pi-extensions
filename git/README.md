@@ -58,16 +58,18 @@ Interruption does not roll back changes already made by Git.
 
 ## Checks
 
+Run static typechecking and linting from the repository root:
+
 ```sh
-# From the repository root:
-PI_PACKAGE_ROOT=/path/to/@earendil-works/pi-coding-agent node --test git/tests/git.test.mjs
-PI_PACKAGE_ROOT=/path/to/@earendil-works/pi-coding-agent python3 git/tests/git-terminal.py
+npm run check
 ```
 
-Tests use disposable repositories and isolated Git configuration.
-The terminal check launches an offline Pi in a pseudo-terminal with this extension and a synthetic readiness marker.
-It covers fullscreen and narrow regular layouts, interactive staging, terminal descriptors and dimensions, editors, pagers, Ctrl+C, terminal restoration, and inline results after `/reload`.
-Success and failure checks require inline results without an Enter prompt, verify exit codes 2 and 128, and run another command afterward.
-Custom entries are checked against Pi's model-context projection to confirm that output stays display-only.
-Verbose success and failure checks exercise bounded capture without rerunning or truncating the command's live output.
-Remote authentication, push/pull, physical keyboard input, Linux, and Windows have not been tested.
+For an interactive PTY smoke check, launch Pi directly against this extension in a disposable Git repository:
+
+```sh
+pi -e ./git/index.ts
+```
+
+Then exercise `/git status`, `/git diff`, `/git commit "Test message"`, interactive commands (`/git add -p`), Ctrl+C interruption, terminal restoration, and inline `git-output` rendering after `/reload`.
+Platform support is checked before suspending Pi's terminal UI; unsupported platforms fail immediately without modifying the transcript.
+Remote authentication, push/pull, Linux, and Windows have not been runtime-tested.

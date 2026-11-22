@@ -12,17 +12,17 @@ It replaces the former `rtk-ffgrep` extension; remove any separately installed c
 | ------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `read` (including 2-block `pi-lens` widened reads)                                                      | `read`     | Repeat reads become stubs; lockfiles, minified files, large truncated JSON, and logs get labelled views; code and prose stay exact                                                                            |
 | Successful `bash` commands that only print one file (`cat`, `sed -n`, `head`, `tail`, `nl`, `rtk read`) | `read`     | Same non-code views as `read`; code and prose stay exact                                                                                                                                                      |
-| Other `bash` commands, including failed ones                                                            | `terminal` | RTK `term` chain, then lossless JSON compaction, grep grouping (`rg` and diagnostics), shared-tail footnotes, and passage deduplication                                                                       |
+| Other `bash` commands, including failed ones                                                            | `terminal` | RTK `term` chain, then lossless JSON compaction, grep grouping (`rg` and diagnostics), passage deduplication, and shared-tail footnotes                                                                       |
 | `bash` commands where every segment runs an `rtk` filter                                                | `terminal` | RTK `term` chain only when output still has terminal escapes, carriage returns, or exceeds RTK's `cap` limits (`> 300` lines or `> 2,000`-char lines); lossless rewrites and passage deduplication still run  |
-| `grep`, `find`, `ls`, FFF's `ffgrep`, `fffind`, `fff-multi-grep`, and FFF's override names              | `listing`  | RTK window that keeps FFF headings and cursors, then lossless grouping for Pi `grep`                                                                                                                          |
-| MCP and other extension tools                                                                           | `generic`  | RTK escapes, base64, and repeated lines, then numbered fenced excerpt deduplication against visible `read` results, lossless JSON compaction, grep grouping, shared-tail footnotes, and passage deduplication |
+| `grep`, `find`, `ls`, FFF's `ffgrep`, `fffind`, `fff-multi-grep`, and FFF's override names              | `listing`  | RTK window when `cap` keeps FFF file headings and cursors intact (skipping RTK `cap` on `> 300`-line FFF output whose middle window contains file headings), then lossless grouping for Pi `grep`             |
+| MCP and other extension tools                                                                           | `generic`  | RTK escapes, base64, and repeated lines, then numbered fenced excerpt deduplication against visible `read` results, lossless JSON compaction, grep grouping, passage deduplication, and shared-tail footnotes |
 | `edit`, `write`, `rtk recall` output                                                                    | none       | Never changed                                                                                                                                                                                                 |
 
 Results smaller than 512 bytes, results containing image blocks, `read` results with unrecognized multi-block layouts, and calls issued by another tool, such as a codemode script, pass through untouched.
 Non-`bash` error results also pass through untouched.
 
 The stock hook mutates the command before execution, and `tool_result` receives that mutated input.
-A compound command is treated as already wrapped only when every non-setup command segment runs an `rtk` subcommand other than `rtk read`.
+A compound command is treated as already wrapped only when every non-setup command segment runs a filtering `rtk` subcommand, excluding pass-through subcommands (`rtk read`, `rtk bypass`, `rtk proxy`, `rtk run`, `rtk recall`).
 Even on wrapped commands, terminal escapes, carriage returns, or outputs over 300 lines or 2,000 characters per line indicate RTK passed raw output through (for example `rtk rg -n -C 2`), so RTK's `term` chain still runs.
 
 ## Reads
@@ -69,11 +69,11 @@ Each lossless rewrite rebuilds its input exactly from its output before it is us
 - **Grep grouping:** `rg -n`, `rtk rg -n -C`, compiler diagnostics, and Pi `grep` lines (`path:12:text`, `path:12: text`, `path-13-context`, and `--` hunk separators) are grouped under one heading per consecutive run of a file, with line numbers kept.
   Plain `grep`/`egrep`/`fgrep` Bash commands stay ungrouped so `pi-lens` can credit search-reads when loaded after this extension.
 - **JSON compaction:** a complete, valid, indented JSON document loses its indentation, keeping any trailing Pi truncation or exit-code notice intact.
-- **Shared tails:** a tail of at least 40 characters shared by three or more non-fenced lines becomes a Markdown footnote marker, defined once at the end.
-  Lines inside fenced code blocks are never rewritten with footnote markers.
 - **Read-excerpt deduplication:** numbered `<line>\t<code>` hunks inside fenced blocks under a ``**`path`**`` heading (such as `codegraph_explore` output) become pointers when every line matches an earlier model-visible `read` of that file.
-- **Passages:** a blank-line-separated passage of at least 256 bytes that the same tool already returned, in a result the model can still see, becomes a pointer to that tool call while keeping surrounding Markdown code fences balanced.
+- **Passages:** runs before shared-tail footnotes so local footnote markers never collide across turns; a blank-line-separated passage of at least 256 bytes that the same tool already returned, in a result the model can still see, becomes a pointer to that tool call while keeping surrounding CommonMark code fences balanced.
   The final passage and trailing notices are always kept, so status lines survive.
+- **Shared tails:** runs after passage deduplication; a tail of at least 40 characters shared by three or more non-fenced lines becomes a Markdown footnote marker, defined once at the end.
+  Lines inside CommonMark fenced code blocks are never rewritten with footnote markers, and shared-tail footnotes are skipped entirely when a code fence remains unclosed at EOF.
 
 ## Pipelines
 
@@ -82,14 +82,14 @@ Each RTK profile has its own pipeline directory under `rtk/`:
 | Profile    | Methods                         | Effect                                                                                                                                                                                                                          |
 | ---------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `terminal` | `term`                          | Removes terminal escapes and progress frames, collapses three or more identical adjacent lines, elides long base64 runs, keeps the first 50 and last 200 lines of outputs over 300 lines, and cuts lines over 2,000 characters. |
-| `listing`  | `ansi`, `cap`                   | Removes terminal escapes, keeps the first 50 and last 200 lines of outputs over 300 lines, and cuts lines over 2,000 characters.                                                                                                |
+| `listing`  | `ansi`, `cap`                   | Removes terminal escapes, keeps the first 50 and last 200 lines of outputs over 300 lines (skipped when FFF file headings fall inside the elided middle window), and cuts lines over 2,000 characters.                          |
 | `generic`  | `ansi`, `base64-elide`, `dedup` | Removes terminal escapes, elides long base64 runs, and collapses repeated adjacent lines without truncating text.                                                                                                               |
 
 `term` is the chain RTK's `rtk:posthook` pipeline applies to non-RTK shell output in Claude Code.
 The `generic` profile does not truncate because MCP output is usually curated and Pi already middle-truncates MCP results at 20 KB.
 Append `"cap"` to its `use` list to window long MCP output as well.
 
-Before starting RTK, the extension checks whether any method of the profile's rule could change the text, such as escapes for `ansi` or more than 300 lines for `cap`.
+Before starting RTK, the extension checks whether any method of the profile's rule could change the text, such as escapes for `ansi` or more than 300 lines for `cap`, and skips `listing` when `cap` would elide middle FFF file headings.
 If none could, RTK is not started.
 Each RTK child process runs with both `RTK_CONFIG_DIR` and `cwd` set to the selected profile directory so project `.rtk/` files in the workspace cannot override the bundled rule.
 The `pi-` prefix keeps RTK from treating `bash` or `mcp__*` names as Claude Code tools, and gives these calls distinct `rtk gain` rows.
@@ -132,7 +132,7 @@ The adapter accepts an RTK replacement only if it is smaller and passes two chec
 
 - **Structure:** the final visible line must survive (ignoring trailing escape-only or reset lines), allowing only RTK's own rewrites of it: removed terminal escapes and progress frames, a `[xN]` repeat count after it, raw or data-URL base64 runs replaced by `[base64 <type>, <size> elided]`, and a long line cut to a prefix with a `[+N chars]` count.
   Every Pi `[... Full output: path]` notice must survive unchanged.
-  In the `listing` profile, output with FFF-style numbered match lines (a space, the line number, then a colon or hyphen) must also keep every file heading and notice in order.
+  In the `listing` profile, output with FFF-style numbered match lines (a space, the line number, then a colon or hyphen) must also keep every file heading and notice in order; `gate.ts` skips RTK `cap` up front when `> 300`-line FFF output has file headings in the middle window, avoiding guaranteed boundary rejections and recall-slot churn.
 - **Recovery:** the output must end with a native RTK recall hint.
   The first filtered result of each session is read back with `rtk recall --full` and must match the original exactly.
   RTK only appends a hint after its store saved the original, so later results skip the readback unless the original itself contains the hash or ends like a hint.
@@ -173,6 +173,6 @@ The adapter's own `rtk recall` readback also counts as a recall in `rtk gain --r
 
 - Results changed by another extension's `context` handler are not visible to deduplication checks; a stub can then point at text that was pruned from the request.
   Reading the same path and offset again returns the exact text.
-- `ffgrep` output is only windowed past 300 lines; FFF already groups matches, limits matches per page and line length, and paginates with a cursor.
+- `ffgrep` output is only windowed past 300 lines when all FFF file headings survive the 50-head/200-tail window (multi-file outputs with headings in the middle window skip RTK `cap` to avoid guaranteed boundary failures and recall-slot churn); FFF already groups matches, limits matches per page and line length, and paginates with a cursor.
   Its `rtk gain` rows are named `pi-ffgrep` instead of `ffgrep`.
 - RTK evicts `posthook` recall entries beyond the 20 most recent lossy RTK hook outputs across concurrent sessions.

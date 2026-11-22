@@ -101,7 +101,7 @@ Do not include sensitive information in tracked task text, and select a provider
 
 Provider-reported usage is stored in non-context Pi custom entries named `progress-usage` with provider/model attribution.
 These entries do not include prompts or model output.
-Pi 1.4 has no public extension API for adding idle background usage to session totals, so these charges are **not included in `/session` totals**.
+Pi 1.6 has no public extension API for adding idle background usage to session totals, so these charges are **not included in `/session` totals**.
 Calls cancelled before a response may be billed without reported usage.
 
 ### Applying proposals
@@ -180,21 +180,21 @@ Read the current state:
 
 ```bash
 printf '%s\n' '{"action":"read"}' |
-  node ~/.pi/agent/extensions/progress/cli.ts --cwd /path/to/project
+  node ~/.pi/agent/git/github.com/zaherg/pi-extensions/progress/cli.ts --cwd /path/to/project
 ```
 
 Explicitly enable a directory through the CLI:
 
 ```bash
 printf '%s\n' '{"action":"start"}' |
-  node ~/.pi/agent/extensions/progress/cli.ts --cwd /path/to/project
+  node ~/.pi/agent/git/github.com/zaherg/pi-extensions/progress/cli.ts --cwd /path/to/project
 ```
 
 Add a task after reading revision `0`:
 
 ```bash
 printf '%s\n' '{"action":"add_task","expected_revision":0,"title":"Add search","description":"Use the existing index to avoid a new service.","steps":["Implement search","Verify supported queries"]}' |
-  node ~/.pi/agent/extensions/progress/cli.ts --cwd /path/to/project
+  node ~/.pi/agent/git/github.com/zaherg/pi-extensions/progress/cli.ts --cwd /path/to/project
 ```
 
 The CLI accepts one JSON request on stdin and defaults to its current directory when `--cwd` is omitted.
@@ -253,17 +253,14 @@ Do not move or remove the file while any writer is active.
 
 ## Verification
 
-Run the storage, background-updater, failure-path, and Pi loader integration suites from `~/.pi/agent`:
+Run static typechecking and linting from the repository root, plus a read-only standalone CLI smoke check:
 
 ```bash
-PI_PACKAGE_ROOT="$HOME/.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/pi-coding-agent" \
-  node --test tests/progress*.test.mjs
+npm run check
+printf '%s\n' '{"action":"read"}' | node ./progress/cli.ts --cwd /tmp
 ```
 
-Set `PI_PACKAGE_ROOT` to the installed Pi package path after upgrades.
-Tests use isolated temporary homes and projects, including real concurrent CLI processes.
-They cover settings merging, settlement scheduling, context filtering, cancellation, coalescing, conflicts, atomic patches, graceful quit draining, and injected I/O failures.
-They do not enable tracking in the actual project or call a model provider.
+The standalone read check does not enable tracking or create any directories; it prints `{ "path": "...", "document": null }` when `/tmp` is not tracked.
 A separate isolated live smoke test verified a minified response and compact saved update with `openrouter/deepseek/deepseek-v4.1-flash`, using synthetic conversation data and temporary storage.
 That single request does not establish reliability across other models or conversations.
 Interactive notifications, minimum-Node compatibility, host-power-loss durability, and cross-platform operation have not been verified.

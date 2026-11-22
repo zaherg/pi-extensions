@@ -1,31 +1,31 @@
 {
-  "name": "@zaherg/pi-extensions",
-  "private": true,
-  "type": "module",
-  "license": "MIT",
-  "engines": {
-    "node": ">=22.19.0"
-  },
-  "scripts": {
-    "check": "node -e 'const fs=require(\"node:fs\"),os=require(\"node:os\"),path=require(\"node:path\"),{spawnSync}=require(\"node:child_process\");if(fs.existsSync(\"./node_modules/@types/node\")){process.exit(spawnSync(\"tsc\",[\"--noEmit\"],{stdio:\"inherit\"}).status??1)}const agentDir=process.env.PI_CODING_AGENT_DIR||path.join(os.homedir(),\".pi/agent\"),piMods=process.env.PI_MODULES||path.join(agentDir,\"install/releases\",fs.readFileSync(path.join(agentDir,\"install/current-version\"),\"utf8\").trim(),\"node_modules\"),tmpCfg=path.join(os.tmpdir(),`pi-ext-tsconfig-${process.pid}.json`);try{fs.writeFileSync(tmpCfg,JSON.stringify({extends:path.resolve(\"tsconfig.json\"),compilerOptions:{typeRoots:[path.join(piMods,\"@types\")],paths:{\"@earendil-works/pi-ai\":[path.join(piMods,\"@earendil-works/pi-ai/dist/index.d.ts\")],\"@earendil-works/pi-coding-agent\":[path.join(piMods,\"@earendil-works/pi-coding-agent/dist/index.d.ts\")],\"@earendil-works/pi-tui\":[path.join(piMods,\"@earendil-works/pi-tui/dist/index.d.ts\")],typebox:[path.join(piMods,\"typebox/build/index.d.mts\")]}},include:[path.resolve(\"**/*.ts\")],exclude:[path.resolve(\"node_modules\"),path.resolve(\"**/.verification/**\")]}));process.exitCode=spawnSync(\"tsc\",[\"-p\",tmpCfg,\"--noEmit\"],{stdio:\"inherit\"}).status??1}finally{try{fs.unlinkSync(tmpCfg)}catch{}}' && biome lint --vcs-enabled=true --vcs-client-kind=git --vcs-use-ignore-file=true --files-ignore-unknown=true ."
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "typebox": "*"
-  },
-  "pi": {
-    "extensions": [
-      "./exit.ts",
-      "./git/index.ts",
-      "./wip.ts",
-      "./phpstorm-mcp/index.ts",
-      "./progress/index.ts",
-      "./rtk-pi-extended/index.ts",
-      "./rtk-gain/index.ts",
-      "./trace/index.ts",
-      "./worker-board/index.ts"
-    ]
-  }
+    "name": "@zaherg/pi-extensions",
+    "private": true,
+    "type": "module",
+    "license": "MIT",
+    "engines": {
+        "node": ">=22.19.0"
+    },
+    "scripts": {
+        "check": "node -e 'const fs=require(\"node:fs\"),os=require(\"node:os\"),path=require(\"node:path\"),{spawnSync}=require(\"node:child_process\");if(fs.existsSync(\"./node_modules/@types/node\")&&fs.existsSync(\"./node_modules/@earendil-works/pi-coding-agent\")){process.exit(spawnSync(\"tsc\",[\"--noEmit\"],{stdio:\"inherit\"}).status??1)}const agentDir=process.env.PI_CODING_AGENT_DIR||path.join(os.homedir(),\".pi/agent\"),piMods=process.env.PI_MODULES||path.join(agentDir,\"install/releases\",fs.readFileSync(path.join(agentDir,\"install/current-version\"),\"utf8\").trim(),\"node_modules\"),tmpDir=fs.mkdtempSync(path.join(os.tmpdir(),\"pi-ext-\")),tmpCfg=path.join(tmpDir,\"tsconfig.json\");try{fs.writeFileSync(tmpCfg,JSON.stringify({extends:path.resolve(\"tsconfig.json\"),compilerOptions:{typeRoots:[path.join(piMods,\"@types\")],paths:{\"@earendil-works/pi-ai\":[path.join(piMods,\"@earendil-works/pi-ai/dist/index.d.ts\")],\"@earendil-works/pi-coding-agent\":[path.join(piMods,\"@earendil-works/pi-coding-agent/dist/index.d.ts\")],\"@earendil-works/pi-tui\":[path.join(piMods,\"@earendil-works/pi-tui/dist/index.d.ts\")],typebox:[path.join(piMods,\"typebox/build/index.d.mts\")]}},include:[path.resolve(\"**/*.ts\")],exclude:[path.resolve(\"node_modules\"),path.resolve(\"**/.verification/**\")]}));process.exitCode=spawnSync(\"tsc\",[\"-p\",tmpCfg,\"--noEmit\"],{stdio:\"inherit\"}).status??1}finally{try{fs.rmSync(tmpDir,{recursive:true,force:true})}catch{}}' && biome lint --error-on-warnings --vcs-enabled=true --vcs-client-kind=git --vcs-use-ignore-file=true --files-ignore-unknown=true ."
+    },
+    "peerDependencies": {
+        "@earendil-works/pi-ai": "*",
+        "@earendil-works/pi-coding-agent": "*",
+        "@earendil-works/pi-tui": "*",
+        "typebox": "*"
+    },
+    "pi": {
+        "extensions": [
+            "./exit.ts",
+            "./git/index.ts",
+            "./wip.ts",
+            "./phpstorm-mcp/index.ts",
+            "./progress/index.ts",
+            "./rtk-pi-extended/index.ts",
+            "./rtk-gain/index.ts",
+            "./trace/index.ts",
+            "./worker-board/index.ts"
+        ]
+    }
 }

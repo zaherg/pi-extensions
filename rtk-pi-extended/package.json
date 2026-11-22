@@ -1,8 +1,0 @@
-{
-    "name": "local-pi-rtk-pi-extended",
-    "private": true,
-    "type": "module",
-    "engines": {
-        "node": ">=22.19.0"
-    }
-}

@@ -46,31 +46,30 @@ No additional npm dependencies or build step are needed at runtime.
 
 ## Installation
 
-Install directly from GitHub:
+Install the `@zaherg/pi-extensions` package directly from GitHub:
 
 ```sh
-pi install git:github.com/zaherg/pi-phpstorm-mcp
+pi install git:github.com/zaherg/pi-extensions
 ```
 
 Pi manages the Git checkout and records the package in `~/.pi/agent/settings.json`.
-You do not need to clone the repository manually.
+You do not need to clone the repository manually; run `pi config` if you want to toggle individual extensions in the bundle.
 Configure `~/.pi/agent/pi-phpstorm-mcp.json` if the defaults below do not match your installation, then restart the existing Pi ACP session.
 
 Remove the Git-installed package with:
 
 ```sh
-pi remove git:github.com/zaherg/pi-phpstorm-mcp
+pi remove git:github.com/zaherg/pi-extensions
 ```
 
-For local development, clone the repository and run `pi install "$PWD"` from its directory instead.
-Keep that checkout in place because Pi loads local packages from their original paths.
-Use `pi remove "$PWD"` from the same directory to remove a local installation.
+For local single-extension development, clone the repository and load it directly with `pi -e ./phpstorm-mcp/index.ts` (or run `pi install "$PWD"` from the repository root and remove it with `pi remove "$PWD"`).
+Keep a local checkout in place because Pi loads local packages from their original paths.
 
 ## Server configuration
 
 The extension reads `~/.pi/agent/pi-phpstorm-mcp.json` at the start of each RPC session when PhpStorm is running and registers it as `phpstorm`.
 The file contains one MCP server configuration object, without an `mcpServers` wrapper.
-If the file does not exist yet, the extension creates it automatically (with `0600` permissions) using the current user's home directory and JetBrains Toolbox's standard macOS path:
+If the file does not exist yet, the extension creates it atomically (with `0600` permissions) using the current user's home directory and JetBrains Toolbox's standard macOS path:
 
 ```json
 {
@@ -96,14 +95,11 @@ The extension does not disable or remove independently configured servers.
 
 ## Verification
 
-Run the dependency-free tests with Node.js 22.19 or later:
+Run static typechecking and linting from the repository root with Node.js 22.19 or later:
 
 ```sh
-npm test
+npm run check
 ```
 
-Tests cover JSON configuration, automatic default-file creation when missing, configuration changes between sessions, and file errors.
-They also exercise the extension's registration boundary for RPC, TUI, print, and JSON sessions, and verify that discovery alone does not inspect applications or register a server.
-Detection tests cover running and closed applications, leftover bridges, unrelated process mentions, repeated session checks, and failed or incomplete process queries.
-The tests use simulated process-query results and a simulated macOS application registry; they do not launch PhpStorm or verify a live IDE connection.
+To verify runtime behavior, launch an RPC session with `pi -e ./phpstorm-mcp/index.ts --mode rpc` while PhpStorm is running or closed and confirm `phpstorm` registers only in RPC mode when PhpStorm is open.
 Native Linux and Windows detection has not been runtime-tested.
