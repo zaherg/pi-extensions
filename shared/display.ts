@@ -13,7 +13,7 @@ export function redactSecrets(text: string): string {
 		)
 		.replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi, "$1 [REDACTED]")
 		.replace(
-			/\b([A-Z0-9_]{0,64}(?:password|passwd|secret|token|api[_-]?key|access[_-]?key)[A-Z0-9_]{0,64}["']?\s*[=:]\s*)(?:"[^"\n]*(?:"|(?=\n)|$)|'[^'\n]*(?:'|(?=\n)|$)|[^\s,;]+)/gi,
+			/(?<![A-Z0-9_-])([A-Z0-9_-]{0,64}(?:password|passwd|secret|token|api[_-]?key|access[_-]?key)[A-Z0-9_-]{0,64}(?:\\*["'])?\s*[=:]\s*)(?:\\\\\\"(?:[^"\\\n]|\\{8}|\\{7}"|\\{4}[^"\\\n]|\\{2}[^"\\\n]|\\[^"\\\n])*(?:\\\\\\"|\\*(?="|\n|$))|\\\\"(?:[^"\\\n]|\\{4}|\\{3}"|\\{2}[^"\\\n]|\\[^"\\\n])*(?:\\\\"|\\*(?="|\n|$))|\\"(?:[^"\\\n]|\\{4}|\\{3}"|\\{2}[^"\\\n]|\\[^"\\\n])*(?:\\"|\\*(?="|\n|$))|"(?:[^"\\\n]|\\[^\n])*(?:"|\\?(?=\n|$))|\\'(?:[^'\\\n]|\\{2}|\\[^'\\\n])*(?:\\'|\\*(?='|\n|$))|'[^'\n]*(?:'|(?=\n)|$)|[^\s,;"'\\})\]>]+)/gi,
 			"$1[REDACTED]",
 		)
 		.replace(
@@ -24,7 +24,7 @@ export function redactSecrets(text: string): string {
 			/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16})\b/g,
 			"[REDACTED]",
 		)
-		.replace(/(https?:\/\/)[^\s/@]+@/gi, "$1[REDACTED]@");
+		.replace(/(https?:\/\/)[^\s/?#"\\<>]+@/gi, "$1[REDACTED]@");
 }
 
 // Strip terminal control characters and redact credentials for display.
