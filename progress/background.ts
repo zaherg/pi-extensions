@@ -170,8 +170,17 @@ function conversation(ctx: ExtensionContext): Conversation {
 function warning(ctx: ExtensionContext, error: unknown, exiting = false): void {
 	const result = errorResult(error);
 	const message = `Progress background update: ${result.code}: ${result.message} ${exiting ? "Exiting without a confirmed progress update." : "The next finished reply can try again."}`;
-	if (ctx.hasUI && !exiting) ctx.ui.notify(message, "warning");
-	else console.error(message);
+	if (!exiting) {
+		try {
+			if (ctx.hasUI) {
+				ctx.ui.notify(message, "warning");
+				return;
+			}
+		} catch {
+			// Context became stale after session replacement or disposal; fall back to stderr.
+		}
+	}
+	console.error(message);
 }
 
 // Race against AbortSignal so providers ignoring cancellation cannot hold the queue.
@@ -194,6 +203,7 @@ async function cancellable<T>(
 
 type Job = {
 	ctx: ExtensionContext;
+	cwd: string;
 	sessionId: string;
 	evidence: Conversation;
 	generation: number;
@@ -209,21 +219,31 @@ export function createProgressUpdater(
 	let pending: Job | undefined;
 	let running: Promise<void> | undefined;
 	let controller: AbortController | undefined;
-	const sameSession = (job: Job): boolean =>
-		!stopped && job.ctx.sessionManager.getSessionId() === job.sessionId;
-	const current = (job: Job): boolean =>
-		sameSession(job) &&
-		job.generation === generation &&
-		JSON.stringify(conversation(job.ctx)) === JSON.stringify(job.evidence);
+	const sameSession = (job: Job): boolean => {
+		if (stopped) return false;
+		try {
+			return job.ctx.sessionManager.getSessionId() === job.sessionId;
+		} catch {
+			return false;
+		}
+	};
+	const current = (job: Job): boolean => {
+		if (job.generation !== generation || !sameSession(job)) return false;
+		try {
+			return JSON.stringify(conversation(job.ctx)) === JSON.stringify(job.evidence);
+		} catch {
+			return false;
+		}
+	};
 
 	async function update(job: Job): Promise<void> {
-		const { ctx } = job;
+		const { ctx, cwd } = job;
 		const abort = new AbortController();
 		controller = abort;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
 			const result = await runProgress(
-				ctx.cwd,
+				cwd,
 				{ action: "read" },
 				abort.signal,
 			);
@@ -336,7 +356,7 @@ export function createProgressUpdater(
 				if (!current(job)) return;
 				abort.signal.throwIfAborted();
 				await applyProgressUpdates(
-					ctx.cwd,
+					cwd,
 					document.revision,
 					updates,
 					abort.signal,
@@ -381,8 +401,9 @@ export function createProgressUpdater(
 			controller?.abort();
 			pending = {
 				ctx,
-				evidence,
+				cwd: ctx.cwd,
 				sessionId: ctx.sessionManager.getSessionId(),
+				evidence,
 				generation: ++generation,
 			};
 			if (!running)

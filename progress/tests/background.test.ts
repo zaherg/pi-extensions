@@ -1299,5 +1299,51 @@ describe("progress/background", () => {
 				stderr.restore();
 			}
 		});
+
+		test("does not throw unhandled rejection when Pi 1.6 ExtensionContext getters become stale mid-flight", async () => {
+			await runProgress(projectDir, { action: "start" });
+			const stderr = captureConsoleError();
+			let stale = false;
+			const staleError = () =>
+				new Error("This extension ctx is stale after session replacement or reload.");
+			let rejectStream!: (err: unknown) => void;
+			const h = createHarness({
+				cwd: projectDir,
+				hasUI: true,
+				streamHandler: () =>
+					new Promise<AssistantMessage>((_resolve, reject) => {
+						rejectStream = reject;
+					}),
+			});
+			const realCtx = h.ctx;
+			const guardedCtx = new Proxy(realCtx, {
+				get(target, prop, receiver) {
+					if (
+						stale &&
+						(prop === "hasUI" ||
+							prop === "sessionManager" ||
+							prop === "cwd" ||
+							prop === "ui")
+					) {
+						throw staleError();
+					}
+					return Reflect.get(target, prop, receiver);
+				},
+			});
+			try {
+				const updater = createProgressUpdater(h.host, createSerialQueue());
+				updater.schedule(guardedCtx);
+				while (h.streamCalls.length === 0) {
+					await new Promise((r) => setTimeout(r, 5));
+				}
+				// Simulate Pi 1.6 session disposal invalidating ctx getters while request fails.
+				stale = true;
+				rejectStream(new Error("transport closed"));
+				await updater.whenIdle();
+				assert.equal(h.notifications.length, 0);
+			} finally {
+				stderr.restore();
+			}
+		});
 	});
 });

@@ -784,4 +784,28 @@ describe("rtk-gain: coalescing, race guard, lifecycle aborts, and non-UI stderr"
 		);
 		assert.equal(chunks[1], "Usage: /rtk-gain [all]\n");
 	});
+
+	it("does not reject when ctx.hasUI getter throws after session disposal mid-refresh", async () => {
+		const d1 = deferred<ExecResult>();
+		const h = createRtkHarness(() => d1.promise);
+		let stale = false;
+		const baseCtx = h.makeContext({ hasUI: true });
+		const guardedCtx = new Proxy(baseCtx, {
+			get(target, prop, receiver) {
+				if (stale && (prop === "hasUI" || prop === "ui" || prop === "cwd")) {
+					throw new Error("This extension ctx is stale after session replacement or reload.");
+				}
+				return Reflect.get(target, prop, receiver);
+			},
+		});
+
+		await h.emit("session_start", {}, guardedCtx);
+		await flushMicrotasks();
+		stale = true;
+		d1.resolve(
+			okExec(gainJson({ total_commands: 1, total_input: 100, total_output: 40, total_saved: 60 })),
+		);
+		await flushMicrotasks();
+		assert.equal(h.statuses.length, 0);
+	});
 });

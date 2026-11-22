@@ -147,14 +147,26 @@ export default function rtkGain(pi: ExtensionAPI): void {
 		const { cwd } = ctx;
 		const next = query(cwd, "rtk", gainArgs, summary).then((gain: Gain | string): Gain | string => {
 			try {
-				if (!signal.aborted && ctx.hasUI) {
-					ctx.ui.setStatus("rtk-gain", typeof gain === "string" ? undefined : `RTK: ${savings(gain, compact)}`);
+				if (!signal.aborted) {
+					try {
+						if (ctx.hasUI) {
+							ctx.ui.setStatus("rtk-gain", typeof gain === "string" ? undefined : `RTK: ${savings(gain, compact)}`);
+						}
+					} catch {
+						// Ignore stale ExtensionContext getters if the session was replaced or disposed mid-query.
+					}
 				}
 			} finally {
 				if (pending === next) pending = undefined;
 				const follow = queued;
 				queued = undefined;
-				if (follow && !lifetime.signal.aborted) void readLocal(follow);
+				if (follow && !lifetime.signal.aborted) {
+					try {
+						void readLocal(follow);
+					} catch {
+						// Ignore stale queued context after session replacement or disposal.
+					}
+				}
 			}
 			return gain;
 		});
@@ -201,8 +213,15 @@ export default function rtkGain(pi: ExtensionAPI): void {
 			const { cwd } = ctx;
 			const show = (text: string, level: NotifyLevel): void => {
 				if (signal.aborted) return;
-				if (ctx.hasUI) ctx.ui.notify(text, level);
-				else process.stderr.write(`${text}\n`);
+				try {
+					if (ctx.hasUI) {
+						ctx.ui.notify(text, level);
+						return;
+					}
+				} catch {
+					// Fall back to stderr if the session context became stale.
+				}
+				process.stderr.write(`${text}\n`);
 			};
 			const scope = args.trim();
 			if (scope && scope !== "all") {
