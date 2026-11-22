@@ -235,23 +235,34 @@ function dedupStub(
 	return { text: stub, mechanism: "read-dedup", complete };
 }
 
+function requestedStart(input: unknown): number {
+	const raw =
+		typeof input === "object" && input !== null
+			? (input as { offset?: unknown }).offset
+			: undefined;
+	return typeof raw === "number" && Number.isSafeInteger(raw) && raw > 0
+		? raw
+		: 1;
+}
+
 async function processRead(
 	route: Route & { path: string },
 	call: Call,
 	deps: Dependencies,
 ): Promise<Processed> {
 	const { path, text } = route;
-	const offset =
-		route.offset ??
-		(typeof call.input === "object" && call.input !== null
-			? (call.input as { offset?: unknown }).offset
-			: undefined);
+	const reqStart = requestedStart(call.input);
+	const offset = route.offset ?? reqStart;
 	const view =
 		call.toolName === "read" ? parseReadView(text, offset) : undefined;
 	if (call.toolName === "read" && !view)
 		return { sample: sample(call, route, "none", text) };
 
-	if (view && deps.reads.forcesFull(path, view.start)) {
+	if (
+		view &&
+		(deps.reads.forcesFull(path, view.start) ||
+			deps.reads.forcesFull(path, reqStart))
+	) {
 		deps.reads.record(path, call.toolCallId, view);
 		return { sample: sample(call, route, "read-forced", text) };
 	}
@@ -272,6 +283,9 @@ async function processRead(
 	if (best) {
 		// Mark ANY_START after a Bash file view so reading any range returns exact text.
 		deps.reads.markReplaced(path, view?.start ?? ANY_START);
+		if (view && reqStart !== view.start) {
+			deps.reads.markReplaced(path, reqStart);
+		}
 		return {
 			text: best.text,
 			sample: sample(call, route, best.mechanism, text, best.text),
@@ -387,7 +401,6 @@ async function processTerminal(
 	for (const [name, rewrite] of [
 		["json-compact", compactJsonDocument],
 		...(allowGrepGroup ? ([["grep-group", groupGrep]] as const) : []),
-		["suffix-factor", factorSuffixes],
 	] as const) {
 		const rewritten = rewrite(body);
 		if (rewritten !== undefined && shrinks(body, rewritten)) {
@@ -405,6 +418,12 @@ async function processTerminal(
 		body = deduped.text;
 		mechanisms.push("passage-dedup");
 	}
+	const indexableTerminal = withNotice(body, trailer) + hint;
+	const factored = factorSuffixes(body);
+	if (factored !== undefined && shrinks(body, factored)) {
+		body = factored;
+		mechanisms.push("suffix-factor");
+	}
 
 	const candidate = withNotice(body, trailer) + hint;
 	const processed = finish(
@@ -418,7 +437,7 @@ async function processTerminal(
 	deps.passages.record(
 		call.toolName,
 		call.toolCallId,
-		processed.text ?? route.text,
+		processed.text !== undefined ? indexableTerminal : route.text,
 	);
 	if (route.wrapped && processed.text === undefined && !processed.failure)
 		return undefined;
@@ -461,7 +480,6 @@ async function processGeneric(
 	for (const [name, rewrite] of [
 		["json-compact", compactJsonDocument],
 		["grep-group", groupGrep],
-		["suffix-factor", factorSuffixes],
 	] as const) {
 		const rewritten = rewrite(body);
 		if (rewritten !== undefined && shrinks(body, rewritten)) {
@@ -479,11 +497,17 @@ async function processGeneric(
 		body = deduped.text;
 		mechanisms.push("passage-dedup");
 	}
+	const indexableGeneric = body + hint;
+	const factored = factorSuffixes(body);
+	if (factored !== undefined && shrinks(body, factored)) {
+		body = factored;
+		mechanisms.push("suffix-factor");
+	}
 	const processed = finish(route, call, body + hint, mechanisms, step.failure);
 	deps.passages.record(
 		call.toolName,
 		call.toolCallId,
-		processed.text ?? route.text,
+		processed.text !== undefined ? indexableGeneric : route.text,
 	);
 	return processed;
 }

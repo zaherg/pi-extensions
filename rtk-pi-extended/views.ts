@@ -233,11 +233,14 @@ const LONG_LINE = 300;
 export function truncateLongLines(text: string): string {
 	return text
 		.split("\n")
-		.map((line: string) =>
-			line.length > LONG_LINE
-				? `${line.slice(0, LONG_LINE)}…[+${line.length - LONG_LINE} chars]`
-				: line,
-		)
+		.map((line: string): string => {
+			if (line.length <= LONG_LINE) return line.toWellFormed();
+			let head = line.slice(0, LONG_LINE);
+			const last = head.charCodeAt(head.length - 1);
+			if (last >= 0xd800 && last <= 0xdbff) head = head.slice(0, -1);
+			head = head.toWellFormed();
+			return `${head}…[+${line.length - head.length} chars]`;
+		})
 		.join("\n");
 }
 
