@@ -140,11 +140,9 @@ function selectNestedCalls(
 		addMatching(
 			(c: NestedCall): boolean => c.name === filterTool && isFailedCall(c),
 		);
-	}
-	addMatching(isFailedCall);
-	if (filterTool) {
 		addMatching((c: NestedCall): boolean => c.name === filterTool);
 	}
+	addMatching(isFailedCall);
 	addMatching((): boolean => true);
 	const shown: IndexedNestedCall[] = [];
 	for (const i of [...chosen].sort((a: number, b: number): number => a - b)) {

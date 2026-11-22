@@ -12,6 +12,7 @@ export default function wipExtension(pi: ExtensionAPI): void {
 	let lifetime = new AbortController();
 
 	pi.on("session_start", (): void => {
+		lifetime.abort();
 		lifetime = new AbortController();
 	});
 	pi.on("session_shutdown", (): void => {

@@ -185,7 +185,10 @@ export function workerRows(
 					};
 				});
 				if (
-					(phase === "failed" || failureKind || wfStateRaw === "failed") &&
+					(phase === "failed" ||
+						failureKind ||
+						wfStateRaw === "failed" ||
+						wfStateRaw === "error") &&
 					!reportedFailure
 				) {
 					childRows.unshift(

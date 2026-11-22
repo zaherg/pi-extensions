@@ -178,6 +178,7 @@ export default function rtkGain(pi: ExtensionAPI): void {
 	}
 
 	pi.on("session_start", (_event: SessionStartEvent, ctx: ExtensionContext): void => {
+		lifetime.abort();
 		lifetime = new AbortController();
 		refresh(ctx);
 	});

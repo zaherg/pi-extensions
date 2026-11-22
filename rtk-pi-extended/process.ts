@@ -263,7 +263,7 @@ async function processRead(
 		(deps.reads.forcesFull(path, view.start) ||
 			deps.reads.forcesFull(path, reqStart))
 	) {
-		deps.reads.record(path, call.toolCallId, view);
+		deps.reads.record(path, call.toolCallId, view, reqStart);
 		return { sample: sample(call, route, "read-forced", text) };
 	}
 	const stub = view ? dedupStub(path, text, view, deps) : undefined;
@@ -292,7 +292,7 @@ async function processRead(
 			...(condensed?.failure ? { failure: condensed.failure } : {}),
 		};
 	}
-	if (view) deps.reads.record(path, call.toolCallId, view);
+	if (view) deps.reads.record(path, call.toolCallId, view, reqStart);
 	if (condensed?.failure)
 		return {
 			sample: sample(

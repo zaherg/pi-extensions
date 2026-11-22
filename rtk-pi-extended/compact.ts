@@ -130,7 +130,8 @@ export function stepFenceLine(
 	line: string,
 	open: FenceState | undefined,
 ): { next: FenceState | undefined; transition: "open" | "close" | "none" } {
-	const match = FENCE_CANDIDATE.exec(line);
+	const clean = line.endsWith("\r") ? line.slice(0, -1) : line;
+	const match = FENCE_CANDIDATE.exec(clean);
 	const marker = match?.[1];
 	const rest = match?.[2] ?? "";
 	if (!marker) return { next: open, transition: "none" };

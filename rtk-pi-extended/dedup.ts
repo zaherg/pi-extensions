@@ -50,11 +50,23 @@ export class ReadIndex {
 	#chars = 0;
 
 	/** Record a verbatim read and clear any forced re-read marker for its range. */
-	record(path: string, toolCallId: string, view: ReadView): void {
+	record(
+		path: string,
+		toolCallId: string,
+		view: ReadView,
+		requestedStart?: number,
+	): void {
 		const replaced = this.#replaced.get(path);
-		replaced?.delete(view.start);
-		replaced?.delete(ANY_START);
-		if (replaced?.size === 0) this.#replaced.delete(path);
+		if (replaced) {
+			const end = view.start + view.lines.length - 1;
+			replaced.delete(view.start);
+			replaced.delete(ANY_START);
+			if (requestedStart !== undefined) replaced.delete(requestedStart);
+			for (const start of replaced) {
+				if (start >= view.start && start <= end) replaced.delete(start);
+			}
+			if (replaced.size === 0) this.#replaced.delete(path);
+		}
 		this.#sources.push({
 			path,
 			toolCallId,

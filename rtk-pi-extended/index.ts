@@ -115,6 +115,7 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 	};
 	// Recreate lifetime on session_start so non-quit session replacements re-enable filtering.
 	pi.on("session_start", (): void => {
+		lifetime.abort();
 		lifetime = new AbortController();
 		recallVerified = false;
 		reported.clear();

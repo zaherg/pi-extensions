@@ -50,7 +50,7 @@ function defaultConfig(home: string): McpServerConfig {
 	};
 }
 
-export function loadOrCreateConfig(configPath: string, home: string): McpServerConfig {
+function loadOrCreateConfig(configPath: string, home: string): McpServerConfig {
 	try {
 		return readConfig(configPath);
 	} catch (cause: unknown) {
@@ -64,8 +64,8 @@ export function loadOrCreateConfig(configPath: string, home: string): McpServerC
 	try {
 		mkdirSync(dir, { recursive: true, mode: 0o700 });
 		const tempPath = join(dir, `.pi-phpstorm-mcp.${process.pid}.${randomUUID()}.tmp`);
-		writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, { flag: "wx", mode: 0o600 });
 		try {
+			writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, { flag: "wx", mode: 0o600 });
 			// Publish atomically via hard link to avoid clobbering concurrent writes or following symlinks.
 			linkSync(tempPath, configPath);
 			return config;
