@@ -47,6 +47,8 @@ export interface Dependencies {
 	context: () => ContextResults;
 	reads: ReadIndex;
 	passages: PassageIndex;
+	/** Guard index mutations against mid-flight abort, compaction, or session switches. */
+	canCommit?: () => boolean;
 }
 
 export interface Processed {
@@ -55,6 +57,10 @@ export interface Processed {
 	sample: Sample;
 	/** Recoverable RTK failure recorded while keeping safe output. */
 	failure?: Failure;
+}
+
+function canCommit(deps: Dependencies): boolean {
+	return deps.canCommit?.() ?? true;
 }
 
 function sample(
@@ -195,8 +201,13 @@ function readStub(view: ReadView, where: string, shared: Overlap): string {
 	const end = view.start + view.lines.length - 1;
 	const call = shared.source.toolCallId;
 	if (shared.from === view.start && shared.to === end) {
+		const sourceEnd = shared.source.start + shared.source.lines.length - 1;
+		const target =
+			shared.source.start === view.start && sourceEnd === end
+				? `the read result of tool call ${call}`
+				: `lines ${view.start}-${end} within tool call ${call} (which read lines ${shared.source.start}-${sourceEnd})`;
 		return withNotice(
-			`[rtk-pi-extended] Unchanged: lines ${view.start}-${end} of ${where} are identical to the read result of tool call ${call}, which is still in this conversation. Use that text, including for edit. Read the same path and offset again to receive it here.`,
+			`[rtk-pi-extended] Unchanged: lines ${view.start}-${end} of ${where} are identical to ${target}, which is still in this conversation. Use that text, including for edit. Read the same path and offset again to receive it here.`,
 			view.notice,
 		);
 	}
@@ -245,6 +256,16 @@ function requestedStart(input: unknown): number {
 		: 1;
 }
 
+function reachedEof(view: ReadView, input: unknown): boolean {
+	if (view.notice !== undefined) return false;
+	const raw =
+		typeof input === "object" && input !== null
+			? (input as { limit?: unknown }).limit
+			: undefined;
+	if (typeof raw !== "number" || !Number.isFinite(raw)) return true;
+	return view.lines.length < raw;
+}
+
 async function processRead(
 	route: Route & { path: string },
 	call: Call,
@@ -258,12 +279,18 @@ async function processRead(
 	if (call.toolName === "read" && !view)
 		return { sample: sample(call, route, "none", text) };
 
+	if (view && reachedEof(view, call.input) && canCommit(deps)) {
+		deps.reads.truncate(path, view.start + view.lines.length - 1);
+	}
+
 	if (
 		view &&
 		(deps.reads.forcesFull(path, view.start) ||
 			deps.reads.forcesFull(path, reqStart))
 	) {
-		deps.reads.record(path, call.toolCallId, view, reqStart);
+		if (canCommit(deps)) {
+			deps.reads.record(path, call.toolCallId, view, reqStart);
+		}
 		return { sample: sample(call, route, "read-forced", text) };
 	}
 	const stub = view ? dedupStub(path, text, view, deps) : undefined;
@@ -272,6 +299,19 @@ async function processRead(
 	const condensed = stub?.complete
 		? undefined
 		: await condense(route, call, view, deps);
+	if (condensed?.failure === "aborted") {
+		return {
+			sample: sample(
+				call,
+				route,
+				condensed.mechanism,
+				text,
+				undefined,
+				"aborted",
+			),
+			failure: "aborted",
+		};
+	}
 	if (
 		condensed &&
 		!condensed.failure &&
@@ -281,10 +321,13 @@ async function processRead(
 	)
 		best = condensed;
 	if (best) {
-		// Mark ANY_START after a Bash file view so reading any range returns exact text.
-		deps.reads.markReplaced(path, view?.start ?? ANY_START);
-		if (view && reqStart !== view.start) {
-			deps.reads.markReplaced(path, reqStart);
+		if (canCommit(deps)) {
+			if (view) deps.reads.evictConflicts(path, view);
+			// Mark ANY_START after a Bash file view so reading any range returns exact text.
+			deps.reads.markReplaced(path, view?.start ?? ANY_START);
+			if (view && reqStart !== view.start) {
+				deps.reads.markReplaced(path, reqStart);
+			}
 		}
 		return {
 			text: best.text,
@@ -292,7 +335,9 @@ async function processRead(
 			...(condensed?.failure ? { failure: condensed.failure } : {}),
 		};
 	}
-	if (view) deps.reads.record(path, call.toolCallId, view, reqStart);
+	if (view && canCommit(deps)) {
+		deps.reads.record(path, call.toolCallId, view, reqStart);
+	}
 	if (condensed?.failure)
 		return {
 			sample: sample(
@@ -386,6 +431,19 @@ async function processTerminal(
 	const step: RtkStepResult = gated
 		? await runRtkStep(route, call, "terminal", deps)
 		: { text: route.text, mechanisms: [] };
+	if (step.failure === "aborted") {
+		return {
+			sample: sample(
+				call,
+				route,
+				"rtk:terminal",
+				route.text,
+				undefined,
+				"aborted",
+			),
+			failure: "aborted",
+		};
+	}
 	const mechanisms = [...step.mechanisms];
 	const { body: withoutHint, hint } = splitRecallHint(step);
 	const { body: initialBody, trailer } = splitBashTrailer(withoutHint);
@@ -434,11 +492,13 @@ async function processTerminal(
 		step.failure,
 		gated ? "rtk:terminal" : "gate",
 	);
-	deps.passages.record(
-		call.toolName,
-		call.toolCallId,
-		processed.text !== undefined ? indexableTerminal : route.text,
-	);
+	if (canCommit(deps)) {
+		deps.passages.record(
+			call.toolName,
+			call.toolCallId,
+			processed.text !== undefined ? indexableTerminal : route.text,
+		);
+	}
 	if (route.wrapped && processed.text === undefined && !processed.failure)
 		return undefined;
 	return processed;
@@ -450,6 +510,19 @@ async function processListing(
 	deps: Dependencies,
 ): Promise<Processed> {
 	const step = await runRtkStep(route, call, "listing", deps);
+	if (step.failure === "aborted") {
+		return {
+			sample: sample(
+				call,
+				route,
+				"rtk:listing",
+				route.text,
+				undefined,
+				"aborted",
+			),
+			failure: "aborted",
+		};
+	}
 	const mechanisms = [...step.mechanisms];
 	const { body: initialBody, hint } = splitRecallHint(step);
 	let body = initialBody;
@@ -469,6 +542,19 @@ async function processGeneric(
 	deps: Dependencies,
 ): Promise<Processed> {
 	const step = await runRtkStep(route, call, "generic", deps);
+	if (step.failure === "aborted") {
+		return {
+			sample: sample(
+				call,
+				route,
+				"rtk:generic",
+				route.text,
+				undefined,
+				"aborted",
+			),
+			failure: "aborted",
+		};
+	}
 	const mechanisms = [...step.mechanisms];
 	const { body: initialBody, hint } = splitRecallHint(step);
 	let body = initialBody;
@@ -504,11 +590,13 @@ async function processGeneric(
 		mechanisms.push("suffix-factor");
 	}
 	const processed = finish(route, call, body + hint, mechanisms, step.failure);
-	deps.passages.record(
-		call.toolName,
-		call.toolCallId,
-		processed.text !== undefined ? indexableGeneric : route.text,
-	);
+	if (canCommit(deps)) {
+		deps.passages.record(
+			call.toolName,
+			call.toolCallId,
+			processed.text !== undefined ? indexableGeneric : route.text,
+		);
+	}
 	return processed;
 }
 

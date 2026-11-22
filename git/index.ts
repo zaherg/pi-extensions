@@ -24,14 +24,30 @@ export function gitShellCommand(args: string): string {
 }
 
 export default function gitExtension(pi: ExtensionAPI): void {
-	let running = false;
+	let activeRun: symbol | undefined;
+	let generation = 0;
+
+	pi.on("session_start", (): void => {
+		generation += 1;
+		activeRun = undefined;
+	});
+	pi.on("session_shutdown", (): void => {
+		generation += 1;
+		activeRun = undefined;
+	});
 
 	// Render custom Git entries in the transcript without sending them to the model.
 	pi.registerEntryRenderer<string>(
 		"git-output",
-		(entry: CustomEntry<string>, _options: EntryRenderOptions, theme: Theme): Component => {
+		(
+			entry: CustomEntry<string>,
+			_options: EntryRenderOptions,
+			theme: Theme,
+		): Component => {
 			const message =
-				typeof entry.data === "string" ? entry.data : "Invalid saved Git output.";
+				typeof entry.data === "string"
+					? entry.data
+					: "Invalid saved Git output.";
 			return new Text(`${theme.fg("accent", "/git")}\n${message}`, 1, 0);
 		},
 	);
@@ -39,11 +55,15 @@ export default function gitExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("git", {
 		description:
 			'Run any Git command with inline results; commit "message" means commit -m "message"',
-		handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
+		handler: async (
+			args: string,
+			ctx: ExtensionCommandContext,
+		): Promise<void> => {
 			if (ctx.mode !== "tui") {
 				throw new Error("/git requires Pi's interactive terminal.");
 			}
-			if (running || !ctx.isIdle()) {
+			const cwd = ctx.cwd;
+			if (activeRun !== undefined || !ctx.isIdle()) {
 				ctx.ui.notify(
 					"Wait for the current operation to finish before running /git.",
 					"warning",
@@ -56,7 +76,9 @@ export default function gitExtension(pi: ExtensionAPI): void {
 				gitShellCommand(args),
 			);
 
-			running = true;
+			const run = Symbol("git");
+			const runGeneration = generation;
+			activeRun = run;
 			// Prevent Ctrl+C from terminating Pi during terminal handoff.
 			const ignoreSigint = (): void => {};
 			process.on("SIGINT", ignoreSigint);
@@ -73,15 +95,11 @@ export default function gitExtension(pi: ExtensionAPI): void {
 						tui.stop();
 						try {
 							// Pass cwd outside the shell string so path metacharacters are not interpreted.
-							result = spawnSync(
-								"/bin/bash",
-								captureArgs,
-								{
-									cwd: ctx.cwd,
-									stdio: ["inherit", "pipe", "inherit"],
-									maxBuffer: CAPTURE_BYTES + 1024,
-								},
-							);
+							result = spawnSync("/bin/bash", captureArgs, {
+								cwd,
+								stdio: ["inherit", "pipe", "inherit"],
+								maxBuffer: CAPTURE_BYTES + 1024,
+							});
 						} finally {
 							tui.start();
 							tui.requestRender(true);
@@ -103,17 +121,23 @@ export default function gitExtension(pi: ExtensionAPI): void {
 				await setImmediate();
 				await setImmediate();
 				process.removeListener("SIGINT", ignoreSigint);
-				running = false;
+				if (activeRun === run) activeRun = undefined;
 			}
+
+			if (runGeneration !== generation) return;
 
 			try {
 				pi.appendEntry<string>("git-output", message);
 			} catch {
 				// Warn instead of failing after Git has already executed.
-				ctx.ui.notify(
-					`Could not save Git's inline result.\n${message}`,
-					"warning",
-				);
+				try {
+					if (ctx.hasUI) {
+						ctx.ui.notify(
+							`Could not save Git's inline result.\n${message}`,
+							"warning",
+						);
+					}
+				} catch {}
 			}
 		},
 	});

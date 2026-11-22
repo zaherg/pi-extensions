@@ -23,6 +23,7 @@ import {
 	MIN_SAVED_BYTES,
 	preservesTrailer,
 	rtkToolName,
+	sanitizeShell,
 	select,
 	structureCheck,
 	worthCondensing,
@@ -47,7 +48,9 @@ function makeEvent(overrides: {
 		toolCallId: "tc-1",
 		toolName: overrides.toolName,
 		input: overrides.input ?? {},
-		content: overrides.content ?? [{ type: "text", text: "x".repeat(MIN_BYTES) }],
+		content: overrides.content ?? [
+			{ type: "text", text: "x".repeat(MIN_BYTES) },
+		],
 		isError: overrides.isError ?? false,
 		details: undefined,
 		...(overrides.parentToolCallId !== undefined
@@ -133,20 +136,36 @@ describe("isRtkWrapped", () => {
 	it("rejects UNFILTERED_RTK_SUBCOMMANDS (read, bypass, proxy, run, recall)", () => {
 		for (const sub of ["read", "bypass", "proxy", "run", "recall"]) {
 			assert.equal(isRtkWrapped(`rtk ${sub} arg`), false, sub);
-			assert.equal(isRtkWrapped(`rtk --quiet ${sub} arg`), false, `--quiet ${sub}`);
+			assert.equal(
+				isRtkWrapped(`rtk --quiet ${sub} arg`),
+				false,
+				`--quiet ${sub}`,
+			);
 		}
 	});
 
 	it("ignores shell operators inside quotes and handles line continuations", () => {
-		assert.equal(
-			isRtkWrapped('rtk git log --grep="a && b || c; d | e"'),
-			true,
-		);
-		assert.equal(
-			isRtkWrapped("rtk git log --grep='x && y | z'"),
-			true,
-		);
+		assert.equal(isRtkWrapped('rtk git log --grep="a && b || c; d | e"'), true);
+		assert.equal(isRtkWrapped("rtk git log --grep='x && y | z'"), true);
 		assert.equal(isRtkWrapped("cd /repo && \\\nrtk git status"), true);
+	});
+
+	it("handles unquoted backslash escapes, ANSI-C $'...' quotes, command substitutions, comments, and URL #fragments", () => {
+		assert.equal(isRtkWrapped("# check author's status\nrtk git status"), true);
+		assert.equal(isRtkWrapped("export SEP=$'a\\'b' && rtk git status"), true);
+		assert.equal(isRtkWrapped("export SEP=$'a\\'b' && git status"), false);
+		assert.equal(isRtkWrapped('rtk git log "$(cat huge.log)"'), false);
+		assert.equal(isRtkWrapped("rtk git log $(cat huge.log)"), false);
+		assert.equal(isRtkWrapped("rtk git log `cat huge.log`"), false);
+		assert.equal(isRtkWrapped('rtk git log "$(rtk git status)"'), true);
+		assert.equal(
+			isRtkWrapped("rtk git log --grep=\\'foo && git status"),
+			false,
+		);
+		assert.equal(
+			sanitizeShell("curl https://example.com/api#frag && rtk status"),
+			"curl https://example.com/api#frag && rtk status",
+		);
 	});
 });
 
@@ -381,11 +400,19 @@ describe("select", () => {
 			{ category: "terminal", text: big, wrapped: true },
 		);
 
-		// rtk recall skipped (including compound and absolute path)
+		// rtk recall skipped (including compound, absolute path, unquoted \' escape, and # comment)
 		for (const cmd of [
 			"rtk recall 0123456789abcdef",
 			"cd /tmp && /usr/local/bin/rtk recall 0123456789abcdef --full",
 			"echo ok; rtk recall deadbeef01234567",
+			"echo \\' && rtk recall 0123456789abcdef",
+			"# inspect user's log\nrtk recall 0123456789abcdef",
+			"export SEP=$'a\\'b' && rtk recall 0123456789abcdef",
+			"rtk -v recall 0123456789abcdef",
+			"env FOO=1 rtk --skip-env recall 0123456789abcdef",
+			"(rtk recall 0123456789abcdef)",
+			'echo "$(rtk recall 0123456789abcdef)"',
+			"echo `rtk recall 0123456789abcdef`",
 		]) {
 			assert.equal(
 				select(
@@ -485,10 +512,7 @@ describe("preservesTrailer", () => {
 			preservesTrailer(orig, `intro\nrepeat line\n[x3]${hint}`),
 			false,
 		);
-		assert.equal(
-			preservesTrailer("a\nb\nb", `a\nb\n[x2]${hint}`),
-			false,
-		);
+		assert.equal(preservesTrailer("a\nb\nb", `a\nb\n[x2]${hint}`), false);
 	});
 
 	it("accepts valid raw, data-URL, and adjacent base64 elisions and rejects short runs", () => {
@@ -536,10 +560,7 @@ describe("preservesTrailer", () => {
 			preservesTrailer(orig, `${"😀".repeat(10)} [+19 chars]${hint}`),
 			false,
 		);
-		assert.equal(
-			preservesTrailer(orig, `${orig} [+0 chars]${hint}`),
-			false,
-		);
+		assert.equal(preservesTrailer(orig, `${orig} [+0 chars]${hint}`), false);
 
 		// Base64 elision followed by long-line cap
 		const b64 = "B".repeat(1_024);
@@ -598,10 +619,7 @@ describe("structureCheck / canCapListing / preservesBoundaries", () => {
 		// Drops second file heading -> false!
 		assert.equal(check(multiFile, "src/a.ts\n 1: alpha\n 10: gamma"), false);
 		// Non-FFF listing without numbered lines only checks trailer
-		assert.equal(
-			check("a.ts:1:foo\nb.ts:2:bar", "b.ts:2:bar"),
-			true,
-		);
+		assert.equal(check("a.ts:1:foo\nb.ts:2:bar", "b.ts:2:bar"), true);
 	});
 
 	it("handles preservesBoundaries edge cases including fuzzy-match annotation and orphan numbered lines", () => {
@@ -616,7 +634,10 @@ describe("structureCheck / canCapListing / preservesBoundaries", () => {
 			"[0 exact matches. Maybe you meant this?]",
 			" 1: orphan()",
 		].join("\n");
-		assert.equal(preservesBoundaries(orphanAfterFuzzy, orphanAfterFuzzy), false);
+		assert.equal(
+			preservesBoundaries(orphanAfterFuzzy, orphanAfterFuzzy),
+			false,
+		);
 	});
 
 	it("evaluates canCapListing across <=300, single-file, multi-file, Pi grep, and orphan numbered lines", () => {
@@ -807,10 +828,7 @@ describe("exceedsCap / ruleMethods / createGate", () => {
 describe("worthReplacing / worthCondensing", () => {
 	it("enforces MIN_SAVED_BYTES (128) on worthReplacing using UTF-8 byte lengths", () => {
 		const base = "a".repeat(300);
-		assert.equal(
-			worthReplacing(base, "a".repeat(300 - MIN_SAVED_BYTES)),
-			true,
-		);
+		assert.equal(worthReplacing(base, "a".repeat(300 - MIN_SAVED_BYTES)), true);
 		assert.equal(
 			worthReplacing(base, "a".repeat(300 - MIN_SAVED_BYTES + 1)),
 			false,
@@ -823,10 +841,7 @@ describe("worthReplacing / worthCondensing", () => {
 
 	it("enforces both MIN_SAVED_BYTES (128) and MIN_SAVED_RATIO (10%) on worthCondensing", () => {
 		// 2000 -> 1850 saves 150 bytes (>= 128) but only 7.5% (< 10%) -> false
-		assert.equal(
-			worthCondensing("a".repeat(2_000), "a".repeat(1_850)),
-			false,
-		);
+		assert.equal(worthCondensing("a".repeat(2_000), "a".repeat(1_850)), false);
 		// 2000 -> 1800 saves 200 bytes (>= 128) and exactly 10% -> true
 		assert.equal(worthCondensing("a".repeat(2_000), "a".repeat(1_800)), true);
 		// 500 -> 400 saves 20% (>= 10%) but only 100 bytes (< 128) -> false

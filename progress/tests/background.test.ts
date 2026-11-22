@@ -155,7 +155,9 @@ interface TestHarness {
 	setSessionId: (id: string) => void;
 	setSettings: (next: Record<string, unknown>) => void;
 	setStreamHandler: (handler: StreamHandler) => void;
-	setModelLookup: (fn: (provider: string, id: string) => Model<Api> | undefined) => void;
+	setModelLookup: (
+		fn: (provider: string, id: string) => Model<Api> | undefined,
+	) => void;
 }
 
 function createHarness(options: {
@@ -172,7 +174,10 @@ function createHarness(options: {
 	const defaultModel = options.model ?? makeModel();
 	let entries: SessionEntry[] = options.entries ?? [
 		makeUserEntry("u1", "Please implement search using the local index."),
-		makeAssistantEntry("a1", "Implemented local search and verified tests pass."),
+		makeAssistantEntry(
+			"a1",
+			"Implemented local search and verified tests pass.",
+		),
 	];
 	let sessionId = "session-1";
 	let settings: Record<string, unknown> = options.settings ?? {
@@ -286,9 +291,7 @@ describe("progress/background", () => {
 
 	beforeEach(async () => {
 		originalHome = process.env.HOME;
-		rootTmp = await realpath(
-			await mkdtemp(join(tmpdir(), "pi-progress-bg-")),
-		);
+		rootTmp = await realpath(await mkdtemp(join(tmpdir(), "pi-progress-bg-")));
 		homeDir = join(rootTmp, "home");
 		projectDir = join(rootTmp, "work", "bg-project");
 		await mkdir(homeDir, { recursive: true });
@@ -430,7 +433,7 @@ describe("progress/background", () => {
 				},
 				makeUserEntry(
 					"u1",
-					"Use Authorization: Bearer supersecrettoken123 and api_key=my_secret_val_99 with https://alice:pass123@example.com/repo",
+					"Use Authorization: \x1b[32mBearer\x1b[0m supersecrettoken123 and api_key\u200b=my_secret_val_99 with https://alice:pass123@example.com/repo",
 				),
 				{
 					type: "message",
@@ -478,7 +481,10 @@ describe("progress/background", () => {
 				projected.messages[0]?.text.includes("my_secret_val_99"),
 				false,
 			);
-			assert.equal(projected.messages[0]?.text.includes("alice:pass123"), false);
+			assert.equal(
+				projected.messages[0]?.text.includes("alice:pass123"),
+				false,
+			);
 			assert.match(projected.messages[0]?.text ?? "", /Bearer \[REDACTED\]/);
 			assert.equal(projected.messages[1]?.role, "assistant");
 			assert.equal(
@@ -502,7 +508,7 @@ describe("progress/background", () => {
 			assert.equal(unfinished.completed, false);
 		});
 
-		test("enforces 24-message, 6000-char per message, and 16000-char total truncation limits", () => {
+		test("enforces 24-message, 6000-char per message, 16000-char total truncation limits, and avoids lone UTF-16 surrogates", () => {
 			// > 24 messages
 			const many = Array.from({ length: 30 }, (_, i) =>
 				i % 2 === 0
@@ -532,6 +538,17 @@ describe("progress/background", () => {
 			for (const msg of resLong.messages) {
 				assert.ok(msg.text.length <= 6000);
 			}
+
+			// Surrogate pair straddling index 5999..6000 must not emit a lone surrogate
+			const astralBoundary = `${"x".repeat(5999)}🚀tail`;
+			const astralRes = projectConversation([
+				makeUserEntry("u-emoji", astralBoundary),
+				makeAssistantEntry("a-emoji", "ok"),
+			]);
+			const slicedUser = astralRes.messages[0]?.text ?? "";
+			assert.equal(slicedUser.length, 5999);
+			assert.equal(slicedUser.isWellFormed(), true);
+			assert.equal(slicedUser.includes("\ufffd"), false);
 		});
 	});
 
@@ -548,10 +565,7 @@ describe("progress/background", () => {
 						"u1",
 						"Build OAuth login using secret_key=TOPSECRET_INPUT_123",
 					),
-					makeAssistantEntry(
-						"a1",
-						"Implemented OAuth login and tests passed.",
-					),
+					makeAssistantEntry("a1", "Implemented OAuth login and tests passed."),
 				],
 				streamHandler: () =>
 					Promise.resolve(
@@ -566,7 +580,8 @@ describe("progress/background", () => {
 										steps: [
 											{
 												id: null,
-												description: "Implement OAuth callback and verify tests",
+												description:
+													"Implement OAuth callback and verify tests",
 												status: "completed",
 												blocked_by: null,
 											},
@@ -593,10 +608,7 @@ describe("progress/background", () => {
 
 			const sentContent = call.context.messages[0]?.content;
 			assert.equal(typeof sentContent, "string");
-			assert.equal(
-				String(sentContent).includes("TOPSECRET_INPUT_123"),
-				false,
-			);
+			assert.equal(String(sentContent).includes("TOPSECRET_INPUT_123"), false);
 			assert.match(String(sentContent), /\[REDACTED\]/);
 
 			// Verify persisted document (and redacted output secret!)
@@ -707,7 +719,27 @@ describe("progress/background", () => {
 			assert.equal(saved.document?.tasks[0]?.title, "Final coalesced task");
 		});
 
-		test("finishBeforeExit waits for active update, logs waiting notice, and stops new schedules", async () => {
+		test("finishBeforeExit waits for active update, logs waiting notice only for tracked model updates, and stops new schedules", async () => {
+			// Untracked project quit during initial read must NOT spam "Waiting for progress update..."
+			const untrackedStderr = captureConsoleError();
+			try {
+				const untracked = createHarness({ cwd: projectDir });
+				const untrackedUpdater = createProgressUpdater(
+					untracked.host,
+					createSerialQueue(),
+				);
+				untrackedUpdater.schedule(untracked.ctx);
+				await untrackedUpdater.finishBeforeExit();
+				assert.equal(
+					untrackedStderr.messages.some((m) =>
+						m.includes("Waiting for progress update"),
+					),
+					false,
+				);
+			} finally {
+				untrackedStderr.restore();
+			}
+
 			await runProgress(projectDir, { action: "start" });
 			let resolveStream!: (msg: AssistantMessage) => void;
 			const harness = createHarness({
@@ -734,7 +766,10 @@ describe("progress/background", () => {
 				// New schedules during closing are ignored
 				harness.setEntries([
 					makeUserEntry("u1", "Please implement search using the local index."),
-					makeAssistantEntry("a1", "Implemented local search and verified tests pass."),
+					makeAssistantEntry(
+						"a1",
+						"Implemented local search and verified tests pass.",
+					),
 				]);
 				updater.schedule(harness.ctx);
 
@@ -941,7 +976,11 @@ describe("progress/background", () => {
 			);
 
 			// Non-zero tokens + stopReason: "length" -> records progress-usage AND warns MODEL_FAILED
-			const billedUsage = makeUsage({ input: 100, output: 4096, totalTokens: 4196 });
+			const billedUsage = makeUsage({
+				input: 100,
+				output: 4096,
+				totalTokens: 4196,
+			});
 			const billedHarness = createHarness({
 				cwd: projectDir,
 				streamHandler: () =>
@@ -977,7 +1016,8 @@ describe("progress/background", () => {
 
 			const rejectHarness = createHarness({
 				cwd: projectDir,
-				streamHandler: () => Promise.reject(new Error("401 Unauthorized secret")),
+				streamHandler: () =>
+					Promise.reject(new Error("401 Unauthorized secret")),
 			});
 			const rejectUpdater = createProgressUpdater(
 				rejectHarness.host,
@@ -1248,7 +1288,8 @@ describe("progress/background", () => {
 				const headless = createHarness({
 					cwd: projectDir,
 					hasUI: false,
-					streamHandler: () => Promise.resolve(makeAssistantMessage("bad json")),
+					streamHandler: () =>
+						Promise.resolve(makeAssistantMessage("bad json")),
 				});
 				const updater1 = createProgressUpdater(
 					headless.host,
@@ -1300,12 +1341,14 @@ describe("progress/background", () => {
 			}
 		});
 
-		test("does not throw unhandled rejection when Pi 1.6 ExtensionContext getters become stale mid-flight", async () => {
+		test("does not throw unhandled rejection when Pi 1.6 ExtensionContext getters and host.appendEntry become stale mid-flight", async () => {
 			await runProgress(projectDir, { action: "start" });
 			const stderr = captureConsoleError();
 			let stale = false;
 			const staleError = () =>
-				new Error("This extension ctx is stale after session replacement or reload.");
+				new Error(
+					"This extension ctx is stale after session replacement or reload.",
+				);
 			let rejectStream!: (err: unknown) => void;
 			const h = createHarness({
 				cwd: projectDir,
@@ -1315,32 +1358,37 @@ describe("progress/background", () => {
 						rejectStream = reject;
 					}),
 			});
+			const guardedHost: Pick<ExtensionAPI, "getSettings" | "appendEntry"> = {
+				getSettings: () => h.host.getSettings(),
+				appendEntry: (customType: string, data?: unknown): void => {
+					if (stale) throw staleError();
+					h.host.appendEntry(customType, data);
+				},
+			};
 			const realCtx = h.ctx;
 			const guardedCtx = new Proxy(realCtx, {
 				get(target, prop, receiver) {
-					if (
-						stale &&
-						(prop === "hasUI" ||
-							prop === "sessionManager" ||
-							prop === "cwd" ||
-							prop === "ui")
-					) {
+					if (stale) {
 						throw staleError();
 					}
 					return Reflect.get(target, prop, receiver);
 				},
 			});
 			try {
-				const updater = createProgressUpdater(h.host, createSerialQueue());
+				const updater = createProgressUpdater(guardedHost, createSerialQueue());
 				updater.schedule(guardedCtx);
 				while (h.streamCalls.length === 0) {
 					await new Promise((r) => setTimeout(r, 5));
 				}
-				// Simulate Pi 1.6 session disposal invalidating ctx getters while request fails.
+				// Simulate Pi 1.6 session disposal invalidating ALL ctx getters & appendEntry while request fails.
 				stale = true;
 				rejectStream(new Error("transport closed"));
 				await updater.whenIdle();
 				assert.equal(h.notifications.length, 0);
+
+				// Calling schedule() with an already-stale ctx must also be a safe no-op.
+				updater.schedule(guardedCtx);
+				await updater.whenIdle();
 			} finally {
 				stderr.restore();
 			}

@@ -24,7 +24,10 @@ import type {
 	McpServerConfig,
 	SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
-import phpstormMcp from "../index.ts";
+import phpstormMcp, {
+	isMcpDisabled,
+	resolvePhpStormCommand,
+} from "../index.ts";
 import { isPhpStormRunning, windowsPowerShell } from "../running.ts";
 
 type SessionStartHandler = (
@@ -88,6 +91,7 @@ function runningResultForCurrentPlatform(running: boolean): ExecResult {
 interface ExtensionHarness {
 	pi: ExtensionAPI;
 	sessionStartHandlers: SessionStartHandler[];
+	emitShutdown: () => void;
 	execCalls: ExecCall[];
 	registered: Array<{ name: string; config: McpServerConfig }>;
 }
@@ -100,13 +104,16 @@ function createExtensionHarness(
 	) => Promise<ExecResult>,
 ): ExtensionHarness {
 	const sessionStartHandlers: SessionStartHandler[] = [];
+	const shutdownHandlers: Array<() => void> = [];
 	const execCalls: ExecCall[] = [];
 	const registered: Array<{ name: string; config: McpServerConfig }> = [];
 
 	const pi = {
-		on(event: string, handler: SessionStartHandler): void {
+		on(event: string, handler: SessionStartHandler | (() => void)): void {
 			if (event === "session_start") {
-				sessionStartHandlers.push(handler);
+				sessionStartHandlers.push(handler as SessionStartHandler);
+			} else if (event === "session_shutdown") {
+				shutdownHandlers.push(handler as () => void);
 			}
 		},
 		exec(
@@ -123,7 +130,15 @@ function createExtensionHarness(
 	} as unknown as ExtensionAPI;
 
 	phpstormMcp(pi);
-	return { pi, sessionStartHandlers, execCalls, registered };
+	return {
+		pi,
+		sessionStartHandlers,
+		emitShutdown(): void {
+			for (const fn of shutdownHandlers) fn();
+		},
+		execCalls,
+		registered,
+	};
 }
 
 function makeSessionStartEvent(): SessionStartEvent {
@@ -136,7 +151,9 @@ function makeExtensionContext(
 	return { mode } as unknown as ExtensionContext;
 }
 
-async function withTempHome<T>(fn: (homeDir: string) => Promise<T>): Promise<T> {
+async function withTempHome<T>(
+	fn: (homeDir: string) => Promise<T>,
+): Promise<T> {
 	const tempHome = mkdtempSync(join(tmpdir(), "pi-phpstorm-mcp-home-"));
 	const originalHome = process.env.HOME;
 	process.env.HOME = tempHome;
@@ -201,7 +218,7 @@ test("windowsPowerShell: resolves System32 PowerShell from SystemRoot, windir, o
 // isPhpStormRunning — macOS (darwin)
 // ---------------------------------------------------------------------------
 
-test("isPhpStormRunning (darwin): detects running vs closed GUI PhpStorm via osascript", async () => {
+test("isPhpStormRunning (darwin): detects running vs closed GUI PhpStorm (release & EAP) via osascript", async () => {
 	const runningExec = createExecPi(async () =>
 		makeExecResult({ stdout: "true\n" }),
 	);
@@ -213,6 +230,7 @@ test("isPhpStormRunning (darwin): detects running vs closed GUI PhpStorm via osa
 	assert.equal(runningExec.calls[0]?.args[2], "-e");
 	const jxaScript = runningExec.calls[0]?.args[3] ?? "";
 	assert.match(jxaScript, /com\.jetbrains\.PhpStorm/);
+	assert.match(jxaScript, /com\.jetbrains\.PhpStorm-EAP/);
 	assert.match(jxaScript, /activationPolicy/);
 	assert.match(jxaScript, /!app\.terminated/);
 	assert.deepEqual(runningExec.calls[0]?.options, {
@@ -343,7 +361,7 @@ test("isPhpStormRunning (win32): queries PowerShell by absolute path and parses 
 });
 
 // ---------------------------------------------------------------------------
-// isPhpStormRunning — error and unsupported platform handling
+// isPhpStormRunning — error, abort, and unsupported platform handling
 // ---------------------------------------------------------------------------
 
 test("isPhpStormRunning: rejects unsupported platforms without invoking pi.exec", async () => {
@@ -356,7 +374,7 @@ test("isPhpStormRunning: rejects unsupported platforms without invoking pi.exec"
 	assert.equal(calls.length, 0);
 });
 
-test("isPhpStormRunning: handles non-zero exit, killed, truncated, and thrown errors cleanly", async () => {
+test("isPhpStormRunning: handles non-zero exit, killed, truncated, thrown errors, and AbortSignal cleanly", async () => {
 	const nonZero = createExecPi(async () =>
 		makeExecResult({ code: 1, stdout: "true\n", stderr: "failed" }),
 	);
@@ -404,6 +422,111 @@ test("isPhpStormRunning: handles non-zero exit, killed, truncated, and thrown er
 			return true;
 		},
 	);
+
+	// Aborted signal returns false quietly without throwing queryError.
+	const controller = new AbortController();
+	const abortedExec = createExecPi(async () => {
+		controller.abort();
+		return makeExecResult({ code: 143, killed: true });
+	});
+	assert.equal(
+		await isPhpStormRunning(
+			abortedExec.pi,
+			"darwin",
+			process.env,
+			controller.signal,
+		),
+		false,
+	);
+});
+
+// ---------------------------------------------------------------------------
+// resolvePhpStormCommand
+// ---------------------------------------------------------------------------
+
+test("resolvePhpStormCommand: checks ~/Applications (release & EAP), /Applications (release & EAP), then falls back to ~/Applications", () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-phpstorm-apps-"));
+	try {
+		const fakeHome = join(root, "home");
+		const fakeSys = join(root, "sys");
+		mkdirSync(fakeHome, { recursive: true });
+		mkdirSync(fakeSys, { recursive: true });
+
+		// Fallback when none exist
+		assert.equal(
+			resolvePhpStormCommand(fakeHome, fakeSys),
+			join(
+				fakeHome,
+				"Applications",
+				"PhpStorm.app",
+				"Contents",
+				"MacOS",
+				"phpstorm",
+			),
+		);
+
+		// System /Applications/PhpStorm EAP.app
+		const sysEap = join(
+			fakeSys,
+			"PhpStorm EAP.app",
+			"Contents",
+			"MacOS",
+			"phpstorm",
+		);
+		mkdirSync(join(fakeSys, "PhpStorm EAP.app", "Contents", "MacOS"), {
+			recursive: true,
+		});
+		writeFileSync(sysEap, "");
+		assert.equal(resolvePhpStormCommand(fakeHome, fakeSys), sysEap);
+
+		// System /Applications/PhpStorm.app takes priority over system EAP
+		const sysRel = join(
+			fakeSys,
+			"PhpStorm.app",
+			"Contents",
+			"MacOS",
+			"phpstorm",
+		);
+		mkdirSync(join(fakeSys, "PhpStorm.app", "Contents", "MacOS"), {
+			recursive: true,
+		});
+		writeFileSync(sysRel, "");
+		assert.equal(resolvePhpStormCommand(fakeHome, fakeSys), sysRel);
+
+		// User ~/Applications/PhpStorm EAP.app takes priority over system
+		const homeEap = join(
+			fakeHome,
+			"Applications",
+			"PhpStorm EAP.app",
+			"Contents",
+			"MacOS",
+			"phpstorm",
+		);
+		mkdirSync(
+			join(fakeHome, "Applications", "PhpStorm EAP.app", "Contents", "MacOS"),
+			{ recursive: true },
+		);
+		writeFileSync(homeEap, "");
+		assert.equal(resolvePhpStormCommand(fakeHome, fakeSys), homeEap);
+
+		// User ~/Applications/PhpStorm.app takes highest priority
+		const homeRel = join(
+			fakeHome,
+			"Applications",
+			"PhpStorm.app",
+			"Contents",
+			"MacOS",
+			"phpstorm",
+		);
+		mkdirSync(
+			join(fakeHome, "Applications", "PhpStorm.app", "Contents", "MacOS"),
+			{ recursive: true },
+		);
+		writeFileSync(homeRel, "");
+		assert.equal(resolvePhpStormCommand(fakeHome, fakeSys), homeRel);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 // ---------------------------------------------------------------------------
@@ -444,6 +567,38 @@ test("phpstormMcp: closed PhpStorm in RPC mode does not create config or registe
 		await handler(makeSessionStartEvent(), makeExtensionContext("rpc"));
 
 		assert.equal(harness.execCalls.length, 1);
+		assert.equal(harness.registered.length, 0);
+		assert.equal(existsSync(join(tempHome, ".pi")), false);
+	});
+});
+
+test("phpstormMcp: session_shutdown aborts in-flight probe and suppresses registration or errors", async () => {
+	await withTempHome(async (tempHome) => {
+		let capturedSignal: AbortSignal | undefined;
+		let releaseProbe!: (res: ExecResult) => void;
+		const harness = createExtensionHarness(
+			(_cmd, _args, options) =>
+				new Promise<ExecResult>((resolve) => {
+					capturedSignal = options?.signal;
+					releaseProbe = resolve;
+				}),
+		);
+		const handler = harness.sessionStartHandlers[0];
+		assert.ok(handler !== undefined);
+
+		const startPromise = handler(
+			makeSessionStartEvent(),
+			makeExtensionContext("rpc"),
+		);
+		assert.ok(capturedSignal instanceof AbortSignal);
+		assert.equal(capturedSignal.aborted, false);
+
+		harness.emitShutdown();
+		assert.equal(capturedSignal.aborted, true);
+
+		releaseProbe(runningResultForCurrentPlatform(true));
+		await assert.doesNotReject(startPromise);
+
 		assert.equal(harness.registered.length, 0);
 		assert.equal(existsSync(join(tempHome, ".pi")), false);
 	});
@@ -502,14 +657,7 @@ test("phpstormMcp: RPC mode with running PhpStorm creates 0600 config atomically
 			env: {
 				IJ_MCP_SERVER_PORT: "64442",
 			},
-			command: join(
-				tempHome,
-				"Applications",
-				"PhpStorm.app",
-				"Contents",
-				"MacOS",
-				"phpstorm",
-			),
+			command: resolvePhpStormCommand(tempHome),
 			args: ["stdioMcpServer"],
 		};
 
@@ -745,8 +893,53 @@ test("phpstormMcp: rejects invalid JSON and invalid config schemas with descript
 			expectInvalidSchema: true,
 		},
 		{
+			label: "empty command",
+			content: JSON.stringify({ type: "stdio", command: "   " }),
+			expectInvalidSchema: true,
+		},
+		{
+			label: "non-string args entry",
+			content: JSON.stringify({
+				type: "stdio",
+				command: "/usr/bin/phpstorm",
+				args: [123],
+			}),
+			expectInvalidSchema: true,
+		},
+		{
+			label: "non-string env entry",
+			content: JSON.stringify({
+				type: "stdio",
+				command: "/usr/bin/phpstorm",
+				env: { PORT: 64442 },
+			}),
+			expectInvalidSchema: true,
+		},
+		{
+			label: "both command and url present",
+			content: JSON.stringify({
+				command: "/usr/bin/phpstorm",
+				url: "http://127.0.0.1:64442/mcp",
+			}),
+			expectInvalidSchema: true,
+		},
+		{
 			label: "non-string url",
 			content: JSON.stringify({ type: "http", url: 42 }),
+			expectInvalidSchema: true,
+		},
+		{
+			label: "empty url",
+			content: JSON.stringify({ type: "http", url: "" }),
+			expectInvalidSchema: true,
+		},
+		{
+			label: "non-string headers entry",
+			content: JSON.stringify({
+				type: "http",
+				url: "http://127.0.0.1:64442/mcp",
+				headers: { Authorization: 123 },
+			}),
 			expectInvalidSchema: true,
 		},
 	];
@@ -843,5 +1036,26 @@ test("phpstormMcp: handles directory at config path and read-only agent director
 				chmodSync(agentDir, 0o700);
 			}
 		});
+	}
+});
+
+test("phpstormMcp: respects --no-mcp flag before -- and skips probing or registering MCP", async () => {
+	assert.equal(isMcpDisabled(["node", "pi", "--mode", "rpc"]), false);
+	assert.equal(isMcpDisabled(["node", "pi", "--no-mcp"]), true);
+	assert.equal(isMcpDisabled(["node", "pi", "--", "--no-mcp"]), false);
+
+	const prevArgv = process.argv;
+	process.argv = [...prevArgv, "--no-mcp"];
+	try {
+		const harness = createExtensionHarness(async () =>
+			runningResultForCurrentPlatform(true),
+		);
+		const handler = harness.sessionStartHandlers[0];
+		assert.ok(handler !== undefined);
+		await handler(makeSessionStartEvent(), makeExtensionContext("rpc"));
+		assert.equal(harness.execCalls.length, 0);
+		assert.equal(harness.registered.length, 0);
+	} finally {
+		process.argv = prevArgv;
 	}
 });

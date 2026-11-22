@@ -16,6 +16,7 @@ import {
 	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
+import { redactSecrets, stripUnsafeText } from "../shared/display.ts";
 import { createProgressUpdater } from "./background.ts";
 import type { ProgressDocument, ProgressResult, Step, Task } from "./store.ts";
 import {
@@ -44,6 +45,33 @@ const ProgressToolParameters = Type.Object(
 
 type ProgressToolInput = Static<typeof ProgressToolParameters>;
 
+function sanitizeField(value: string): string {
+	return redactSecrets(stripUnsafeText(value));
+}
+
+function sanitizeProgressInput(params: ProgressToolInput): ProgressToolInput {
+	if (params.action === "read") return params;
+	return {
+		...params,
+		...(typeof params.title === "string"
+			? { title: sanitizeField(params.title) }
+			: {}),
+		...(typeof params.description === "string"
+			? { description: sanitizeField(params.description) }
+			: {}),
+		...(typeof params.blocked_by === "string"
+			? { blocked_by: sanitizeField(params.blocked_by) }
+			: {}),
+		...(Array.isArray(params.steps)
+			? {
+					steps: params.steps.map((step: unknown) =>
+						typeof step === "string" ? sanitizeField(step) : (step as string),
+					),
+				}
+			: {}),
+	};
+}
+
 function summary(document: ProgressDocument): string {
 	const steps = document.tasks.flatMap((task: Task) => task.steps);
 	return `${document.tasks.length} tasks; ${steps.filter((step: Step) => step.status === "completed").length}/${steps.length} steps completed; ${steps.filter((step: Step) => step.status === "blocked").length} blocked; revision ${document.revision}.`;
@@ -61,14 +89,20 @@ export default function progressExtension(pi: ExtensionAPI): void {
 		return undefined;
 	});
 	pi.on("session_start", () => updater.start());
-	pi.on("session_shutdown", async (event: SessionShutdownEvent): Promise<void> => {
-		if (event.reason === "quit") await updater.finishBeforeExit();
-		else updater.shutdown();
-	});
+	pi.on(
+		"session_shutdown",
+		async (event: SessionShutdownEvent): Promise<void> => {
+			if (event.reason === "quit") await updater.finishBeforeExit();
+			else updater.shutdown();
+		},
+	);
 	pi.on("session_tree", () => updater.invalidate());
-	pi.on("agent_settled", (event: AgentSettledEvent, ctx: ExtensionContext): void => {
-		if (!event.aborted) updater.schedule(ctx);
-	});
+	pi.on(
+		"agent_settled",
+		(event: AgentSettledEvent, ctx: ExtensionContext): void => {
+			if (!event.aborted) updater.schedule(ctx);
+		},
+	);
 
 	pi.registerTool<typeof ProgressToolParameters, ProgressResult>({
 		name: "progress",
@@ -103,9 +137,11 @@ export default function progressExtension(pi: ExtensionAPI): void {
 						"INVALID_REQUEST",
 						"Use /progress start to enable tracking.",
 					);
+				const { cwd } = ctx;
+				const sanitized = sanitizeProgressInput(params);
 				const result = await withFileMutationQueue(
-					await progressPath(ctx.cwd),
-					() => runProgress(ctx.cwd, params, signal),
+					await progressPath(cwd),
+					() => runProgress(cwd, sanitized, signal),
 				);
 				const output = truncateHead(JSON.stringify(result));
 				const text =
@@ -127,7 +163,21 @@ export default function progressExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("progress", {
 		description:
 			"Show tracking status, or /progress start to enable this directory",
-		handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
+		handler: async (
+			args: string,
+			ctx: ExtensionCommandContext,
+		): Promise<void> => {
+			const notify = (message: string, level: "info" | "error"): void => {
+				try {
+					if (ctx.hasUI) {
+						ctx.ui.notify(message, level);
+						return;
+					}
+				} catch {
+					// Fall back when ExtensionCommandContext getters become stale mid-flight.
+				}
+				if (level === "error") process.stderr.write(`${message}\n`);
+			};
 			try {
 				const action = args.trim();
 				if (action !== "" && action !== "start")
@@ -135,21 +185,22 @@ export default function progressExtension(pi: ExtensionAPI): void {
 						"INVALID_REQUEST",
 						"Usage: /progress [start]",
 					);
+				const { cwd } = ctx;
 				const result = await withFileMutationQueue(
-					await progressPath(ctx.cwd),
+					await progressPath(cwd),
 					() =>
-						runProgress(ctx.cwd, {
+						runProgress(cwd, {
 							action: action === "start" ? "start" : "read",
 						}),
 				);
-				ctx.ui.notify(
+				notify(
 					result.document
 						? `${result.path}\n${summary(result.document)}`
 						: `Tracking is off. Run /progress start to enable it at ${result.path}.`,
 					"info",
 				);
 			} catch (error: unknown) {
-				ctx.ui.notify(failure(error), "error");
+				notify(failure(error), "error");
 			}
 		},
 	});
@@ -162,7 +213,8 @@ export default function progressExtension(pi: ExtensionAPI): void {
 		): Promise<BeforeAgentStartEventResult | undefined> => {
 			updater.invalidate();
 			try {
-				const result = await runProgress(ctx.cwd, { action: "read" });
+				const { cwd } = ctx;
+				const result = await runProgress(cwd, { action: "read" });
 				if (!result.document) return undefined;
 				return {
 					message: {

@@ -29,6 +29,7 @@ import {
 	SettingsManager,
 	wrapRegisteredTool,
 } from "@earendil-works/pi-coding-agent";
+import { resolvePhpStormCommand } from "../phpstorm-mcp/index.ts";
 import { isPhpStormRunning } from "../phpstorm-mcp/running.ts";
 import { filterPosthook } from "../rtk-pi-extended/bridge.ts";
 import { structureCheck } from "../rtk-pi-extended/policy.ts";
@@ -76,10 +77,7 @@ function cleanGitEnv(
 	};
 }
 
-function createTempGitRepo(
-	root: string,
-	env: Record<string, string>,
-): string {
+function createTempGitRepo(root: string, env: Record<string, string>): string {
 	const repo = join(root, "repo");
 	execFileSync("git", ["init", "-b", "main", repo], { env, stdio: "pipe" });
 	writeFileSync(join(repo, "README.md"), "# test\n", "utf8");
@@ -162,13 +160,27 @@ describe("Pi 1.6 real harness integration", () => {
 		});
 
 		const runtimeErrors: ExtensionError[] = [];
+		const widgetCalls: Array<{ key: string; active: boolean }> = [];
+		const statusCalls: Array<{ key: string; text: string | undefined }> = [];
 		try {
 			assert.deepEqual(extensionsResult.errors, []);
+			const baseUi = session.extensionRunner?.createContext().ui;
+			assert.ok(baseUi, "expected base ExtensionUIContext");
 			await session.bindExtensions({
+				uiContext: {
+					...baseUi,
+					setWidget(key, content) {
+						widgetCalls.push({ key, active: content !== undefined });
+					},
+					setStatus(key, text) {
+						statusCalls.push({ key, text });
+					},
+				},
 				onError: (err: ExtensionError) => runtimeErrors.push(err),
 			});
 			const runner = session.extensionRunner;
 			assert.ok(runner, "expected real ExtensionRunner");
+			assert.equal(runner.createContext().hasUI, true);
 
 			assert.deepEqual(runner.getCommandDiagnostics(), []);
 			assert.deepEqual(runner.getShortcutDiagnostics(), []);
@@ -321,7 +333,7 @@ describe("Pi 1.6 real harness integration", () => {
 			});
 			assert.equal(smallBash, undefined);
 
-			// Subagent workflowChildren shape handled cleanly by worker-board without UI crashes.
+			// Subagent workflowChildren shape rendered cleanly by worker-board via live uiContext.
 			const workflowDetails = {
 				mode: "workflow",
 				results: [],
@@ -364,6 +376,10 @@ describe("Pi 1.6 real harness integration", () => {
 				},
 				isError: false,
 			});
+			assert.ok(
+				widgetCalls.some((c) => c.key === "worker-board" && c.active),
+				"expected worker-board widget rendered during subagent execution",
+			);
 
 			// 4. Verify CustomEntry isolation in real Pi buildSessionContext()
 			sessionManager.appendCustomEntry("git-output", "## main\n");
@@ -405,7 +421,7 @@ describe("Pi 1.6 real harness integration", () => {
 				timestamp: Date.now(),
 			};
 			const assistantEntryId = sessionManager.appendMessage(assistantMsg);
-			await runner.emitBoundary(
+			const boundary = await runner.emitBoundary(
 				{
 					type: "turn_end",
 					turnIndex: 0,
@@ -422,6 +438,13 @@ describe("Pi 1.6 real harness integration", () => {
 					pendingMessages: [],
 					canContinue: true,
 				}),
+			);
+			assert.equal(boundary.valid, true);
+			assert.ok(
+				boundary.entries.some(
+					(e) => "customType" in e && e.customType === "rtk-pi-extended",
+				),
+				`expected rtk-pi-extended ledger CustomEntry in turn_end boundary, got ${JSON.stringify(boundary.entries)}`,
 			);
 			await runner.emit({ type: "agent_end", messages: [] });
 			await runner.emit({
@@ -452,6 +475,14 @@ describe("Pi 1.6 real harness integration", () => {
 			await runner.emit({ type: "session_shutdown", reason: "new" });
 			await runner.emit({ type: "session_start", reason: "new" });
 			await runner.emit({ type: "session_shutdown", reason: "quit" });
+			assert.ok(
+				widgetCalls.some((c) => c.key === "worker-board" && !c.active),
+				"expected worker-board widget cleared on session shutdown",
+			);
+			assert.ok(
+				statusCalls.some((c) => c.key === "rtk-gain" && c.text === undefined),
+				"expected rtk-gain status cleared on session shutdown",
+			);
 
 			assert.deepEqual(
 				runtimeErrors,
@@ -594,6 +625,11 @@ describe("Pi 1.6 real harness integration", () => {
 				...ALL_EXTENSION_PATHS.flatMap((p: string) => ["-e", p]),
 			],
 		});
+		const rpcErrors: unknown[] = [];
+		client.onEvent((event) => {
+			const wireEvent: { readonly type: string } = event;
+			if (wireEvent.type === "extension_error") rpcErrors.push(event);
+		});
 
 		try {
 			await client.start();
@@ -601,10 +637,7 @@ describe("Pi 1.6 real harness integration", () => {
 			assert.equal(state.isStreaming, false);
 
 			const commands = await client.getCommands();
-			assert.deepEqual(
-				commands.map((c) => c.name).sort(),
-				EXPECTED_COMMANDS,
-			);
+			assert.deepEqual(commands.map((c) => c.name).sort(), EXPECTED_COMMANDS);
 
 			// Execute /wip end-to-end through Pi's real RPC command loop and verify real git commit!
 			assert.equal(await client.prompt("/wip"), "handled");
@@ -627,118 +660,134 @@ describe("Pi 1.6 real harness integration", () => {
 			}).trim();
 			assert.equal(porcelain, "");
 
-			// Exercise all non-TUI slash commands cleanly over RPC with zero stderr errors.
+			// Exercise all non-TUI slash commands cleanly over RPC with zero stderr or extension_error events.
 			assert.equal(await client.prompt("/progress"), "handled");
 			assert.equal(await client.prompt("/rtk-gain"), "handled");
 			assert.equal(await client.prompt("/rtk-coverage 1 all"), "handled");
 			assert.equal(await client.prompt("/trace"), "handled");
 			assert.equal(await client.prompt("/workers"), "handled");
 
+			assert.deepEqual(rpcErrors, []);
 			assert.equal(client.getStderr(), "");
 		} finally {
 			await client.stop();
 		}
 	});
 
-	it(
-		"filters and recalls byte-for-byte against the real installed rtk binary across all 3 bundled profiles and parses live rtk gain JSON",
-		{ skip: !resolveExecutable("rtk") ? "rtk binary not on PATH" : false },
-		async () => {
-			const repeatedTerminal = `${Array.from(
-				{ length: 120 },
-				() =>
-					"\x1b[32mPASS\x1b[0m src/foo.test.ts: repeated status output line with padding 0123456789",
-			).join("\n")}\nDone.\n`;
-			const termRes = await filterPosthook(
-				"bash",
-				repeatedTerminal,
-				{ configDirectory: resolve("rtk-pi-extended/rtk/terminal") },
-				structureCheck("terminal"),
-				true,
+	it("filters and recalls byte-for-byte against the real installed rtk binary across all 3 bundled profiles and parses live rtk gain JSON", {
+		skip: !resolveExecutable("rtk") ? "rtk binary not on PATH" : false,
+	}, async () => {
+		const isolatedHome = mkdtempSync(join(tmpdir(), "pi-rtk-live-"));
+		tempDirs.push(isolatedHome);
+		const rtkEnv = {
+			...process.env,
+			HOME: isolatedHome,
+			XDG_DATA_HOME: join(isolatedHome, "data"),
+			XDG_CONFIG_HOME: join(isolatedHome, "config"),
+		};
+
+		const repeatedTerminal = `${Array.from(
+			{ length: 120 },
+			() =>
+				"\x1b[32mPASS\x1b[0m src/foo.test.ts: repeated status output line with padding 0123456789",
+		).join("\n")}\nDone.\n`;
+		const termRes = await filterPosthook(
+			"bash",
+			repeatedTerminal,
+			{
+				configDirectory: resolve("rtk-pi-extended/rtk/terminal"),
+				env: rtkEnv,
+			},
+			structureCheck("terminal"),
+			true,
+		);
+		assert.equal(termRes.kind, "filtered");
+		assert.ok(termRes.text.length < repeatedTerminal.length);
+
+		const singleFileListing = `src/big-file.ts\n${Array.from(
+			{ length: 360 },
+			(_, i) => ` ${i + 1}: const match${i} = computeValue(${i});`,
+		).join("\n")}\n`;
+		const listRes = await filterPosthook(
+			"grep",
+			singleFileListing,
+			{
+				configDirectory: resolve("rtk-pi-extended/rtk/listing"),
+				env: rtkEnv,
+			},
+			structureCheck("listing"),
+			true,
+		);
+		assert.equal(listRes.kind, "filtered");
+		assert.ok(listRes.text.length < singleFileListing.length);
+
+		const repeatedGeneric = `${Array.from(
+			{ length: 120 },
+			() =>
+				'{"status":"ok","payload":"repeated generic line for dedup test 0123456789"}',
+		).join("\n")}\nDone.\n`;
+		const genRes = await filterPosthook(
+			"custom_tool",
+			repeatedGeneric,
+			{
+				configDirectory: resolve("rtk-pi-extended/rtk/generic"),
+				env: rtkEnv,
+			},
+			structureCheck("generic"),
+			true,
+		);
+		assert.equal(genRes.kind, "filtered");
+		assert.ok(genRes.text.length < repeatedGeneric.length);
+
+		// Verify real `rtk gain --format json` matches rtk-gain's expected counter schema inside isolated HOME.
+		const rtkBin = resolveExecutable("rtk");
+		assert.ok(rtkBin);
+		const gainRaw = execFileSync(rtkBin, ["gain", "--format", "json"], {
+			encoding: "utf8",
+			env: rtkEnv,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		const gainParsed = JSON.parse(gainRaw) as {
+			summary?: Record<string, unknown>;
+		};
+		assert.ok(gainParsed.summary && typeof gainParsed.summary === "object");
+		for (const key of [
+			"total_commands",
+			"total_input",
+			"total_output",
+			"total_saved",
+		]) {
+			const value: unknown = gainParsed.summary[key];
+			assert.equal(
+				typeof value,
+				"number",
+				`expected numeric ${key} in live rtk gain JSON`,
 			);
-			assert.equal(termRes.kind, "filtered");
-			assert.ok(termRes.text.length < repeatedTerminal.length);
+			assert.equal(Number.isSafeInteger(value), true);
+			assert.ok((value as number) >= 0);
+		}
+	});
 
-			const singleFileListing = `src/big-file.ts\n${Array.from(
-				{ length: 360 },
-				(_, i) => ` ${i + 1}: const match${i} = computeValue(${i});`,
-			).join("\n")}\n`;
-			const listRes = await filterPosthook(
-				"grep",
-				singleFileListing,
-				{ configDirectory: resolve("rtk-pi-extended/rtk/listing") },
-				structureCheck("listing"),
-				true,
-			);
-			assert.equal(listRes.kind, "filtered");
-			assert.ok(listRes.text.length < singleFileListing.length);
+	it("suspends and restores real Pi interactive TUI for /git and exits cleanly via /exit in a real PTY", {
+		skip:
+			process.platform === "win32" ||
+			!existsSync(join(getPackageDir(), "dist", "cli.js")) ||
+			!resolveExecutable("python3")
+				? "requires POSIX with Pi CLI and python3"
+				: false,
+	}, () => {
+		const tmp = mkdtempSync(join(tmpdir(), "pi-pty-e2e-"));
+		tempDirs.push(tmp);
+		const env = cleanGitEnv({ HOME: tmp });
+		const repo = createTempGitRepo(tmp, env);
+		writeFileSync(join(repo, "untracked.txt"), "dirty\n", "utf8");
+		const agentDir = join(tmp, "agent");
+		const cliJs = join(getPackageDir(), "dist", "cli.js");
 
-			const repeatedGeneric = `${Array.from(
-				{ length: 120 },
-				() =>
-					'{"status":"ok","payload":"repeated generic line for dedup test 0123456789"}',
-			).join("\n")}\nDone.\n`;
-			const genRes = await filterPosthook(
-				"custom_tool",
-				repeatedGeneric,
-				{ configDirectory: resolve("rtk-pi-extended/rtk/generic") },
-				structureCheck("generic"),
-				true,
-			);
-			assert.equal(genRes.kind, "filtered");
-			assert.ok(genRes.text.length < repeatedGeneric.length);
-
-			// Verify real `rtk gain --format json` matches rtk-gain's expected counter schema.
-			const rtkBin = resolveExecutable("rtk");
-			assert.ok(rtkBin);
-			const gainRaw = execFileSync(rtkBin, ["gain", "--format", "json"], {
-				encoding: "utf8",
-				stdio: ["ignore", "pipe", "pipe"],
-			});
-			const gainParsed = JSON.parse(gainRaw) as {
-				summary?: Record<string, unknown>;
-			};
-			assert.ok(gainParsed.summary && typeof gainParsed.summary === "object");
-			for (const key of [
-				"total_commands",
-				"total_input",
-				"total_output",
-				"total_saved",
-			]) {
-				const value: unknown = gainParsed.summary[key];
-				assert.equal(
-					typeof value,
-					"number",
-					`expected numeric ${key} in live rtk gain JSON`,
-				);
-				assert.equal(Number.isSafeInteger(value), true);
-				assert.ok((value as number) >= 0);
-			}
-		},
-	);
-
-	it(
-		"suspends and restores real Pi interactive TUI for /git and exits cleanly via /exit in a real PTY",
-		{
-			skip:
-				process.platform === "win32" ||
-				!resolveExecutable("pi") ||
-				!resolveExecutable("python3")
-					? "requires POSIX with pi and python3 on PATH"
-					: false,
-		},
-		() => {
-			const tmp = mkdtempSync(join(tmpdir(), "pi-pty-e2e-"));
-			tempDirs.push(tmp);
-			const env = cleanGitEnv({ HOME: tmp });
-			const repo = createTempGitRepo(tmp, env);
-			writeFileSync(join(repo, "untracked.txt"), "dirty\n", "utf8");
-			const agentDir = join(tmp, "agent");
-
-			const pyScript = `
+		const pyScript = `
 import fcntl, os, pty, re, select, subprocess, sys, termios, time
 
-repo, home_dir, agent_dir, git_ext, exit_ext = sys.argv[1:6]
+node_bin, cli_js, repo, home_dir, agent_dir, git_ext, exit_ext = sys.argv[1:8]
 master, slave = pty.openpty()
 env = {
     **os.environ,
@@ -750,7 +799,8 @@ env = {
     "GIT_CONFIG_SYSTEM": "/dev/null",
 }
 cmd = [
-    "pi",
+    node_bin,
+    cli_js,
     "--no-extensions",
     "--no-skills",
     "--no-prompt-templates",
@@ -809,23 +859,24 @@ try:
 finally:
     os.close(master)
 `;
-			const pyBin = resolveExecutable("python3");
-			assert.ok(pyBin);
-			execFileSync(
-				pyBin,
-				[
-					"-c",
-					pyScript,
-					repo,
-					tmp,
-					agentDir,
-					resolve("git/index.ts"),
-					resolve("exit.ts"),
-				],
-				{ env, stdio: "pipe", timeout: 15_000 },
-			);
-		},
-	);
+		const pyBin = resolveExecutable("python3");
+		assert.ok(pyBin);
+		execFileSync(
+			pyBin,
+			[
+				"-c",
+				pyScript,
+				process.execPath,
+				cliJs,
+				repo,
+				tmp,
+				agentDir,
+				resolve("git/index.ts"),
+				resolve("exit.ts"),
+			],
+			{ env, stdio: "pipe", timeout: 15_000 },
+		);
+	});
 
 	it("runs progress background updater end-to-end through real ModelRegistry.streamSimple over loopback HTTP SSE", async () => {
 		const proposal = JSON.stringify({
@@ -1078,14 +1129,7 @@ finally:
 
 	it("connects phpstorm-mcp live to the running PhpStorm IDE through real createMcpExtension and invokes a real MCP tool", async (t) => {
 		const realHome = homedir();
-		const phpstormBin = join(
-			realHome,
-			"Applications",
-			"PhpStorm.app",
-			"Contents",
-			"MacOS",
-			"phpstorm",
-		);
+		const phpstormBin = resolvePhpStormCommand(realHome);
 		let running = false;
 		if (process.platform === "darwin" && existsSync(phpstormBin)) {
 			try {
@@ -1101,7 +1145,10 @@ finally:
 
 		const tmp = mkdtempSync(join(tmpdir(), "pi-phpstorm-live-"));
 		tempDirs.push(tmp);
-		symlinkSync(join(realHome, "Applications"), join(tmp, "Applications"));
+		const userApps = join(realHome, "Applications");
+		if (existsSync(userApps)) {
+			symlinkSync(userApps, join(tmp, "Applications"));
+		}
 		const prevHome = process.env.HOME;
 		process.env.HOME = tmp;
 
@@ -1152,7 +1199,8 @@ finally:
 						0,
 					);
 				} finally {
-					if (runner) await runner.emit({ type: "session_shutdown", reason: "quit" });
+					if (runner)
+						await runner.emit({ type: "session_shutdown", reason: "quit" });
 					await session.dispose();
 				}
 			}
@@ -1216,14 +1264,18 @@ finally:
 					"expected live PhpStorm IDE to expose mcp__phpstorm__* tools",
 				);
 
-				const readOnlyTool =
-					phpstormTools.find(
-						(tool) =>
-							tool.definition.name === "mcp__phpstorm__get_all_open_file_paths",
-					) ?? phpstormTools[0];
-				assert.ok(readOnlyTool);
+				const readOnlyTool = phpstormTools.find(
+					(tool) =>
+						tool.definition.name === "mcp__phpstorm__get_all_open_file_paths",
+				);
+				assert.ok(
+					readOnlyTool,
+					"expected mcp__phpstorm__get_all_open_file_paths tool from live PhpStorm",
+				);
 				const wrapped = wrapRegisteredTool(readOnlyTool, runner);
-				const toolResult = await wrapped.execute("live-phpstorm-1", {});
+				const toolResult = await wrapped.execute("live-phpstorm-1", {
+					projectPath: resolve("."),
+				});
 				assert.ok(
 					Array.isArray(toolResult.content) && toolResult.content.length > 0,
 					"expected non-empty MCP response from live PhpStorm IDE",
@@ -1237,6 +1289,159 @@ finally:
 		} finally {
 			if (prevHome === undefined) delete process.env.HOME;
 			else process.env.HOME = prevHome;
+		}
+	});
+
+	it("disposes session cleanly while background progress SSE and tool_result hooks are mid-flight without unhandled rejections", async () => {
+		const sockets = new Set<import("node:net").Socket>();
+		const server = createServer((req, res) => {
+			req.on("data", () => {});
+			req.on("end", () => {
+				res.writeHead(200, {
+					"content-type": "text/event-stream",
+					"cache-control": "no-cache",
+				});
+				const timer = setTimeout(() => {
+					res.write("data: [DONE]\n\n");
+					res.end();
+				}, 250);
+				res.on("close", () => clearTimeout(timer));
+			});
+		});
+		server.on("connection", (sock) => {
+			sockets.add(sock);
+			sock.on("close", () => sockets.delete(sock));
+		});
+		await new Promise<void>((resolveListen) =>
+			server.listen(0, "127.0.0.1", () => resolveListen()),
+		);
+		const { port } = server.address() as AddressInfo;
+
+		const tmp = mkdtempSync(join(tmpdir(), "pi-midflight-dispose-"));
+		tempDirs.push(tmp);
+		const prevHome = process.env.HOME;
+		process.env.HOME = tmp;
+
+		const unhandled: unknown[] = [];
+		const onRejection = (reason: unknown) => unhandled.push(reason);
+		const onException = (err: unknown) => unhandled.push(err);
+		process.on("unhandledRejection", onRejection);
+		process.on("uncaughtException", onException);
+
+		try {
+			const agentDir = join(tmp, "agent");
+			const settingsManager = SettingsManager.inMemory({
+				defaultProvider: "local-sse",
+				defaultModel: "progress-test",
+			});
+			const loader = new DefaultResourceLoader({
+				cwd: tmp,
+				agentDir,
+				settingsManager,
+				noExtensions: true,
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				noContextFiles: true,
+				additionalExtensionPaths: ALL_EXTENSION_PATHS,
+			});
+			await loader.reload();
+
+			const sessionManager = SessionManager.inMemory(tmp);
+			const { session, extensionsResult } = await createAgentSession({
+				cwd: tmp,
+				agentDir,
+				resourceLoader: loader,
+				sessionManager,
+				settingsManager,
+				noTools: "builtin",
+			});
+			assert.deepEqual(extensionsResult.errors, []);
+
+			const runtimeErrors: ExtensionError[] = [];
+			await session.bindExtensions({
+				onError: (err: ExtensionError) => runtimeErrors.push(err),
+			});
+			const runner = session.extensionRunner;
+			assert.ok(runner);
+			runner.createContext().modelRegistry.registerProvider("local-sse", {
+				baseUrl: `http://127.0.0.1:${port}/v1`,
+				apiKey: "test-key",
+				api: "openai-completions",
+				models: [
+					{
+						id: "progress-test",
+						name: "Progress Test",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 4096,
+					},
+				],
+			});
+
+			const progressCmd = runner.getCommand("progress");
+			assert.ok(progressCmd);
+			await progressCmd.handler("start", runner.createCommandContext());
+			sessionManager.appendMessage({
+				role: "user",
+				content: "Start mid-flight work",
+				timestamp: Date.now(),
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "Working..." }],
+				api: "openai-completions",
+				provider: "local-sse",
+				model: "progress-test",
+				usage: {
+					input: 5,
+					output: 5,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 10,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+
+			await runner.emit({ type: "agent_settled", aborted: false });
+			const inflightToolResult = runner.emitToolResult({
+				type: "tool_result",
+				toolCallId: "midflight-read",
+				toolName: "read",
+				input: { path: "src/inflight.ts" },
+				content: [
+					{
+						type: "text",
+						text: Array.from(
+							{ length: 30 },
+							(_, i) => `export const x${i} = ${i};`,
+						).join("\n"),
+					},
+				],
+				details: undefined,
+				isError: false,
+			});
+
+			await runner.emit({ type: "session_shutdown", reason: "new" });
+			await session.dispose();
+			await inflightToolResult;
+			await new Promise((r) => setTimeout(r, 80));
+
+			assert.deepEqual(runtimeErrors, []);
+			assert.deepEqual(unhandled, []);
+		} finally {
+			process.off("unhandledRejection", onRejection);
+			process.off("uncaughtException", onException);
+			if (prevHome === undefined) delete process.env.HOME;
+			else process.env.HOME = prevHome;
+			for (const sock of sockets) sock.destroy();
+			await new Promise<void>((resolveClose) =>
+				server.close(() => resolveClose()),
+			);
 		}
 	});
 });

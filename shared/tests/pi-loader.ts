@@ -15,8 +15,13 @@ function resolvePiModules(): string | undefined {
 	const agentDir =
 		process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 	const versionFile = join(agentDir, "install", "current-version");
-	if (!existsSync(versionFile)) return undefined;
-	const version = readFileSync(versionFile, "utf8").trim();
+	let version: string;
+	try {
+		version = readFileSync(versionFile, "utf8").trim();
+	} catch {
+		return undefined;
+	}
+	if (!version) return undefined;
 	const releaseModules = join(
 		agentDir,
 		"install",

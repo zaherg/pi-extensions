@@ -11,7 +11,7 @@ import type {
 	ModelRegistry,
 	SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { redactSecrets } from "../shared/display.ts";
+import { redactSecrets, stripUnsafeText } from "../shared/display.ts";
 import {
 	applyProgressUpdates,
 	errorResult,
@@ -115,47 +115,70 @@ export function selectProgressModel(
 
 function safeJson(value: unknown): string {
 	return JSON.stringify(value, (_key: string, item: unknown) =>
-		typeof item === "string" ? redactSecrets(item) : item,
+		typeof item === "string" ? redactSecrets(stripUnsafeText(item)) : item,
 	);
 }
 
-export function projectConversation(entries: readonly SessionEntry[]): Conversation {
+export function projectConversation(
+	entries: readonly SessionEntry[],
+): Conversation {
 	const messages: Conversation["messages"] = [];
 	let remaining = MAX_TRANSCRIPT_CHARS;
 	let truncated = false;
+	let latestMessage:
+		| Extract<SessionEntry, { type: "message" }>["message"]
+		| undefined;
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (entry?.type === "message") {
+			latestMessage = entry.message;
+			break;
+		}
+	}
+	const completed =
+		latestMessage?.role === "assistant" && latestMessage.stopReason === "stop";
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		if (entry?.type !== "message") continue;
 		const message = entry.message;
 		if (message.role !== "user" && message.role !== "assistant") continue;
 		if (message.role === "assistant" && message.stopReason !== "stop") continue;
-		// Redact common credential patterns before sending transcript excerpts.
-		const text = redactSecrets(
+		const rawContent =
 			typeof message.content === "string"
 				? message.content
 				: message.content
 						.filter((part): part is TextContent => part.type === "text")
 						.map((part: TextContent) => part.text)
-						.join("\n"),
-		);
-		if (!text.trim()) continue;
+						.join("\n");
+		const stripped = stripUnsafeText(rawContent);
+		if (!stripped.trim()) continue;
 		if (messages.length === 24 || remaining === 0) {
 			truncated = true;
 			break;
 		}
+		// Bound message length before regex redaction while preserving PEM blocks up to 64 KiB.
+		const maxScan = stripped.includes("PRIVATE KEY") ? 65_536 : 16_384;
+		let bounded = stripped;
+		if (stripped.length > maxScan) {
+			truncated = true;
+			bounded = stripped.slice(0, maxScan).replace(/\S+$/u, "");
+		}
+		// Redact common credential patterns before sending transcript excerpts.
+		const text = redactSecrets(bounded);
+		if (!text.trim()) continue;
 		const limit = Math.min(6000, remaining);
 		if (text.length > limit) truncated = true;
-		const selected = text.slice(0, limit);
+		const raw = text.slice(0, limit);
+		const last = raw.charCodeAt(raw.length - 1);
+		const selected = (
+			last >= 0xd800 && last <= 0xdbff ? raw.slice(0, -1) : raw
+		).toWellFormed();
 		messages.unshift({ id: entry.id, role: message.role, text: selected });
 		remaining -= selected.length;
 	}
-	const latest = entries.filter((entry) => entry.type === "message").at(-1);
-	const completed =
-		latest?.message.role === "assistant" &&
-		latest.message.stopReason === "stop";
 	return { messages, truncated, completed };
 }
-function conversation(ctx: ExtensionContext): Conversation {
+function projectedEntries(ctx: ExtensionContext): SessionEntry[] {
 	// Use Pi's session projection so context edits and compaction are respected.
 	const entries: SessionEntry[] = [];
 	for (const {
@@ -165,7 +188,20 @@ function conversation(ctx: ExtensionContext): Conversation {
 		if (sourceEntry.type !== "message") continue;
 		for (const message of messages) entries.push({ ...sourceEntry, message });
 	}
-	return projectConversation(entries);
+	return entries;
+}
+function hasCompletedReply(entries: readonly SessionEntry[]): boolean {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (entry?.type !== "message") continue;
+		return (
+			entry.message.role === "assistant" && entry.message.stopReason === "stop"
+		);
+	}
+	return false;
+}
+function conversation(ctx: ExtensionContext): Conversation {
+	return projectConversation(projectedEntries(ctx));
 }
 function warning(ctx: ExtensionContext, error: unknown, exiting = false): void {
 	const result = errorResult(error);
@@ -205,7 +241,9 @@ type Job = {
 	ctx: ExtensionContext;
 	cwd: string;
 	sessionId: string;
-	evidence: Conversation;
+	modelRegistry: ModelRegistry;
+	entries: SessionEntry[];
+	evidence?: Conversation | undefined;
 	generation: number;
 };
 export function createProgressUpdater(
@@ -217,6 +255,8 @@ export function createProgressUpdater(
 	let stopped = false;
 	let closing = false;
 	let pending: Job | undefined;
+	let activeJob: Job | undefined;
+	let activeModelUpdate = false;
 	let running: Promise<void> | undefined;
 	let controller: AbortController | undefined;
 	const sameSession = (job: Job): boolean => {
@@ -227,34 +267,46 @@ export function createProgressUpdater(
 			return false;
 		}
 	};
+	const jobEvidence = (job: Job): Conversation => {
+		if (!job.evidence) job.evidence = projectConversation(job.entries);
+		return job.evidence;
+	};
 	const current = (job: Job): boolean => {
 		if (job.generation !== generation || !sameSession(job)) return false;
 		try {
-			return JSON.stringify(conversation(job.ctx)) === JSON.stringify(job.evidence);
+			return (
+				JSON.stringify(conversation(job.ctx)) ===
+				JSON.stringify(jobEvidence(job))
+			);
 		} catch {
 			return false;
 		}
 	};
 
 	async function update(job: Job): Promise<void> {
-		const { ctx, cwd } = job;
+		const { ctx, cwd, modelRegistry } = job;
 		const abort = new AbortController();
 		controller = abort;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
-			const result = await runProgress(
-				cwd,
-				{ action: "read" },
-				abort.signal,
-			);
+			const result = await runProgress(cwd, { action: "read" }, abort.signal);
 			const document = result.document;
-			if (!document || !current(job)) return;
-			const model = selectProgressModel(host.getSettings(), ctx.modelRegistry);
+			if (!document || job.generation !== generation || !sameSession(job))
+				return;
+			const evidence = jobEvidence(job);
+			if (
+				!evidence.completed ||
+				evidence.messages.at(-1)?.role !== "assistant" ||
+				!current(job)
+			)
+				return;
+			activeModelUpdate = true;
+			const model = selectProgressModel(host.getSettings(), modelRegistry);
 			const maxTokens = Math.min(4096, model.maxTokens);
 			const payload = safeJson({
 				revision: document.revision,
 				tasks: document.tasks,
-				conversation: job.evidence,
+				conversation: evidence,
 			});
 			// Reserve a conservative byte budget for the system prompt and generated JSON.
 			if (
@@ -278,7 +330,7 @@ export function createProgressUpdater(
 			let response: AssistantMessage;
 			try {
 				response = await cancellable(
-					ctx.modelRegistry
+					modelRegistry
 						.streamSimple(
 							model,
 							{
@@ -312,12 +364,17 @@ export function createProgressUpdater(
 					response.usage.input > 0 ||
 					response.usage.output > 0 ||
 					response.usage.totalTokens > 0)
-			)
-				host.appendEntry<ProgressUsageEntry>("progress-usage", {
-					provider: model.provider,
-					model: model.id,
-					usage: response.usage,
-				});
+			) {
+				try {
+					host.appendEntry<ProgressUsageEntry>("progress-usage", {
+						provider: model.provider,
+						model: model.id,
+						usage: response.usage,
+					});
+				} catch {
+					// Ignore stale ExtensionAPI calls when the session runner was disposed mid-flight.
+				}
+			}
 			if (!current(job)) return;
 			if (response.stopReason !== "stop")
 				throw new ProgressError(
@@ -372,6 +429,7 @@ export function createProgressUpdater(
 			)
 				warning(ctx, error, closing);
 		} finally {
+			activeModelUpdate = false;
 			clearTimeout(timer);
 			if (controller === abort) controller = undefined;
 		}
@@ -380,7 +438,12 @@ export function createProgressUpdater(
 		while (pending) {
 			const job = pending;
 			pending = undefined;
-			await update(job);
+			activeJob = job;
+			try {
+				await update(job);
+			} finally {
+				if (activeJob === job) activeJob = undefined;
+			}
 		}
 	}
 	function invalidate(): void {
@@ -395,20 +458,33 @@ export function createProgressUpdater(
 	return {
 		schedule(ctx: ExtensionContext): void {
 			if (stopped || closing) return;
-			const evidence = conversation(ctx);
-			if (!evidence.completed || evidence.messages.at(-1)?.role !== "assistant")
+			let entries: SessionEntry[];
+			let cwd: string;
+			let sessionId: string;
+			let modelRegistry: ModelRegistry;
+			try {
+				entries = projectedEntries(ctx);
+				if (!hasCompletedReply(entries)) return;
+				cwd = ctx.cwd;
+				sessionId = ctx.sessionManager.getSessionId();
+				modelRegistry = ctx.modelRegistry;
+			} catch {
 				return;
+			}
 			controller?.abort();
 			pending = {
 				ctx,
-				cwd: ctx.cwd,
-				sessionId: ctx.sessionManager.getSessionId(),
-				evidence,
+				cwd,
+				sessionId,
+				modelRegistry,
+				entries,
 				generation: ++generation,
 			};
 			if (!running)
 				running = drain()
-					.catch((error: unknown) => warning(ctx, error, closing))
+					.catch((error: unknown) => {
+						if (activeJob) warning(activeJob.ctx, error, closing);
+					})
 					.finally(() => {
 						running = undefined;
 					});
@@ -423,8 +499,10 @@ export function createProgressUpdater(
 		async finishBeforeExit(): Promise<void> {
 			if (!closing) {
 				closing = true;
-				// Log to stderr because Pi stops the interactive TUI before awaiting quit handlers.
-				if (running) console.error("Waiting for progress update before quitting Pi...");
+				// Log to stderr only when a tracked project's model update is actively in flight.
+				if (running && activeModelUpdate) {
+					console.error("Waiting for progress update before quitting Pi...");
+				}
 			}
 			try {
 				await running;

@@ -29,8 +29,6 @@ const LISTING = new Set([
 	"fff-multi-grep",
 	"multi_grep",
 ]);
-// Leave rtk recall output untouched so stored originals reach the model verbatim.
-const RTK_RECALL = /(?:^|[|&;(\s])(?:\S*\/)?rtk\s+recall\b/;
 export const SHELL_SETUP = new Set([
 	"cd",
 	"set",
@@ -117,57 +115,275 @@ function textBlocks(
 	return texts;
 }
 
-function sanitizeShell(command: string): string {
-	return command
-		.replace(/\\\r?\n/g, " ")
-		.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, "''");
+function skipSingleQuoted(command: string, from: number): number {
+	let i = from;
+	while (i < command.length && command[i] !== "'") i++;
+	return i < command.length ? i + 1 : i;
 }
 
-/** Return true when every non-setup shell segment runs through an rtk filter subcommand. */
-export function isRtkWrapped(command: string): boolean {
-	const sanitized = sanitizeShell(command);
-	let active = 0;
-	for (const segment of sanitized.split(/(?:&&|\|\||;|\||\n)+/)) {
-		const words = segment.match(/[^\s()]+/g) ?? [];
-		let index = 0;
-		while (index < words.length) {
-			const word = words[index] ?? "";
-			if (word.includes("=")) {
-				index++;
-				continue;
-			}
-			const base = word.slice(word.lastIndexOf("/") + 1);
-			if (SHELL_PREFIX.has(base)) {
-				index++;
-				while ((words[index] ?? "").startsWith("-")) {
-					const flag = words[index] ?? "";
-					index++;
-					if (flag === "--") break;
-					if (
-						SHELL_PREFIX_FLAGS_WITH_ARG[base]?.has(flag) &&
-						index < words.length
-					) {
-						index++;
-					}
-				}
-				continue;
-			}
-			break;
-		}
-		const program = words[index];
-		if (program === undefined || program === "''") continue;
-		const name = program.slice(program.lastIndexOf("/") + 1);
-		if (SHELL_SETUP.has(name)) continue;
-		active++;
-		if (name !== "rtk") return false;
-		const subcommand = words
-			.slice(index + 1)
-			.find((token: string) => !token.startsWith("-"));
-		// Skip rtk subcommands that pass raw unfiltered output through.
-		if (subcommand === undefined || UNFILTERED_RTK_SUBCOMMANDS.has(subcommand))
-			return false;
+function skipAnsiCQuoted(command: string, from: number): number {
+	let i = from;
+	while (i < command.length && command[i] !== "'") {
+		i += command[i] === "\\" ? 2 : 1;
 	}
-	return active > 0;
+	return Math.min(command.length, i < command.length ? i + 1 : i);
+}
+
+function consumeBackticks(
+	command: string,
+	from: number,
+): { inner: string; next: number } {
+	let i = from;
+	let inner = "";
+	while (i < command.length && command[i] !== "`") {
+		if (command[i] === "\\" && i + 1 < command.length) {
+			const escaped = command[i + 1] ?? "";
+			if (escaped === "`" || escaped === "$" || escaped === "\\") {
+				inner += escaped;
+			} else if (escaped !== "\n") {
+				inner += `\\${escaped}`;
+			}
+			i += 2;
+			continue;
+		}
+		inner += command[i] ?? "";
+		i++;
+	}
+	return { inner, next: i < command.length ? i + 1 : i };
+}
+
+function consumeDollarParen(
+	command: string,
+	from: number,
+	depth = 0,
+): { inner: string; next: number } {
+	let i = from;
+	let parens = 1;
+	while (i < command.length && parens > 0) {
+		const ch = command[i];
+		if (ch === "\\") {
+			i += 2;
+		} else if (ch === "$" && command[i + 1] === "'") {
+			i = skipAnsiCQuoted(command, i + 2);
+		} else if (ch === "'") {
+			i = skipSingleQuoted(command, i + 1);
+		} else if (ch === '"') {
+			i++;
+			while (i < command.length && command[i] !== '"') {
+				if (command[i] === "\\") {
+					i += 2;
+				} else if (
+					command[i] === "$" &&
+					command[i + 1] === "(" &&
+					command[i + 2] !== "(" &&
+					depth < 16
+				) {
+					i = consumeDollarParen(command, i + 2, depth + 1).next;
+				} else if (command[i] === "`") {
+					i = consumeBackticks(command, i + 1).next;
+				} else {
+					i++;
+				}
+			}
+			if (i < command.length) i++;
+		} else if (ch === "`") {
+			i = consumeBackticks(command, i + 1).next;
+		} else if (
+			ch === "#" &&
+			(i === from || /[\s;|&()]/.test(command[i - 1] ?? ""))
+		) {
+			while (i < command.length && command[i] !== "\n") i++;
+		} else if (ch === "(") {
+			parens++;
+			i++;
+		} else if (ch === ")") {
+			parens--;
+			if (parens === 0) {
+				return { inner: command.slice(from, i), next: i + 1 };
+			}
+			i++;
+		} else {
+			i++;
+		}
+	}
+	return { inner: command.slice(from), next: command.length };
+}
+
+function scanShell(command: string): {
+	sanitized: string;
+	substitutions: string[];
+	unclosedSubstitution: boolean;
+} {
+	const substitutions: string[] = [];
+	let unclosedSubstitution = false;
+	let out = "";
+	let i = 0;
+	while (i < command.length) {
+		const ch = command[i] ?? "";
+		if (ch === "\\" && command[i + 1] === "\n") {
+			out += " ";
+			i += 2;
+		} else if (
+			ch === "\\" &&
+			command[i + 1] === "\r" &&
+			command[i + 2] === "\n"
+		) {
+			out += " ";
+			i += 3;
+		} else if (ch === "\\") {
+			out += " ";
+			i += Math.min(2, command.length - i);
+		} else if (ch === "$" && command[i + 1] === "'") {
+			out += "''";
+			i = skipAnsiCQuoted(command, i + 2);
+		} else if (ch === "'") {
+			out += "''";
+			i = skipSingleQuoted(command, i + 1);
+		} else if (ch === "$" && command[i + 1] === "(" && command[i + 2] !== "(") {
+			const sub = consumeDollarParen(command, i + 2);
+			if (command[sub.next - 1] !== ")") unclosedSubstitution = true;
+			substitutions.push(sub.inner);
+			out += "''";
+			i = sub.next;
+		} else if (ch === "`") {
+			const sub = consumeBackticks(command, i + 1);
+			if (command[sub.next - 1] !== "`") unclosedSubstitution = true;
+			substitutions.push(sub.inner);
+			out += "''";
+			i = sub.next;
+		} else if (ch === '"') {
+			i++;
+			while (i < command.length && command[i] !== '"') {
+				if (command[i] === "\\" && command[i + 1] === "\n") {
+					i += 2;
+				} else if (
+					command[i] === "\\" &&
+					command[i + 1] === "\r" &&
+					command[i + 2] === "\n"
+				) {
+					i += 3;
+				} else if (command[i] === "\\") {
+					i += Math.min(2, command.length - i);
+				} else if (
+					command[i] === "$" &&
+					command[i + 1] === "(" &&
+					command[i + 2] !== "("
+				) {
+					const sub = consumeDollarParen(command, i + 2);
+					if (command[sub.next - 1] !== ")") unclosedSubstitution = true;
+					substitutions.push(sub.inner);
+					i = sub.next;
+				} else if (command[i] === "`") {
+					const sub = consumeBackticks(command, i + 1);
+					if (command[sub.next - 1] !== "`") unclosedSubstitution = true;
+					substitutions.push(sub.inner);
+					i = sub.next;
+				} else {
+					i++;
+				}
+			}
+			if (i < command.length) i++;
+			out += "''";
+		} else if (
+			ch === "#" &&
+			(i === 0 || /[\s;|&()]/.test(command[i - 1] ?? ""))
+		) {
+			while (i < command.length && command[i] !== "\n") i++;
+			out += " ";
+		} else {
+			out += ch;
+			i++;
+		}
+	}
+	return { sanitized: out, substitutions, unclosedSubstitution };
+}
+
+/** Join line continuations, strip unquoted escapes and comments, and blank quoted literals. */
+export function sanitizeShell(command: string): string {
+	return scanShell(command).sanitized;
+}
+
+function parseSegmentInvocation(
+	segment: string,
+): { name: string; subcommand?: string } | undefined {
+	const words = segment.match(/[^\s(){}]+/g) ?? [];
+	let index = 0;
+	while (index < words.length) {
+		const word = words[index] ?? "";
+		if (word === "!" || word.includes("=")) {
+			index++;
+			continue;
+		}
+		const base = word.slice(word.lastIndexOf("/") + 1);
+		if (SHELL_PREFIX.has(base)) {
+			index++;
+			while ((words[index] ?? "").startsWith("-")) {
+				const flag = words[index] ?? "";
+				index++;
+				if (flag === "--") break;
+				if (
+					SHELL_PREFIX_FLAGS_WITH_ARG[base]?.has(flag) &&
+					index < words.length
+				) {
+					index++;
+				}
+			}
+			continue;
+		}
+		break;
+	}
+	const program = words[index];
+	if (program === undefined || program === "''") return undefined;
+	const name = program.slice(program.lastIndexOf("/") + 1);
+	const subcommand = words
+		.slice(index + 1)
+		.find((token: string) => !token.startsWith("-"));
+	return subcommand === undefined ? { name } : { name, subcommand };
+}
+
+/** Leave rtk recall output untouched even behind prefixes, flags, subshells, or command substitutions. */
+export function hasRtkRecall(command: string): boolean {
+	const queue = [command];
+	for (let cursor = 0; cursor < queue.length && cursor < 64; cursor++) {
+		const current = queue[cursor] ?? "";
+		const { sanitized, substitutions } = scanShell(current);
+		for (const segment of sanitized.split(/(?:&&|\|\||;|\||\n|[()])+/)) {
+			const invocation = parseSegmentInvocation(segment);
+			if (invocation?.name === "rtk" && invocation.subcommand === "recall") {
+				return true;
+			}
+		}
+		queue.push(...substitutions);
+	}
+	return false;
+}
+
+/** Return true when every non-setup shell segment and command substitution runs through an rtk filter subcommand. */
+export function isRtkWrapped(command: string): boolean {
+	const queue = [command];
+	let topActive = 0;
+	for (let cursor = 0; cursor < queue.length; cursor++) {
+		if (cursor >= 64) return false;
+		const current = queue[cursor] ?? "";
+		const { sanitized, substitutions, unclosedSubstitution } =
+			scanShell(current);
+		if (unclosedSubstitution) return false;
+		for (const segment of sanitized.split(/(?:&&|\|\||;|\||\n|[()])+/)) {
+			const invocation = parseSegmentInvocation(segment);
+			if (!invocation || SHELL_SETUP.has(invocation.name)) continue;
+			if (cursor === 0) topActive++;
+			if (invocation.name !== "rtk") return false;
+			// Skip rtk subcommands that pass raw unfiltered output through.
+			if (
+				invocation.subcommand === undefined ||
+				UNFILTERED_RTK_SUBCOMMANDS.has(invocation.subcommand)
+			) {
+				return false;
+			}
+		}
+		queue.push(...substitutions);
+	}
+	return topActive > 0;
 }
 
 /** Return the filtering category for a tool name, or undefined when excluded. */
@@ -223,8 +439,7 @@ export function select(event: ToolResultEvent, cwd: string): Route | undefined {
 
 	if (event.toolName === "bash") {
 		const command = event.input.command;
-		if (typeof command !== "string" || RTK_RECALL.test(sanitizeShell(command)))
-			return undefined;
+		if (typeof command !== "string" || hasRtkRecall(command)) return undefined;
 		const path =
 			!event.isError && blocks.length === 1
 				? bashFileView(command, cwd)

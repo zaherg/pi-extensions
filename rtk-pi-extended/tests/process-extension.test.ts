@@ -87,7 +87,9 @@ function makeDeps(overrides: Partial<Dependencies> = {}): {
 function makeLines(from: number, to: number, prefix = "line"): string[] {
 	const out: string[] = [];
 	for (let i = from; i <= to; i++) {
-		out.push(`${prefix} ${String(i).padStart(3, "0")}: ${"abcdefghij".repeat(3)}`);
+		out.push(
+			`${prefix} ${String(i).padStart(3, "0")}: ${"abcdefghij".repeat(3)}`,
+		);
 	}
 	return out;
 }
@@ -107,28 +109,30 @@ after(async () => {
 });
 
 describe("processRoute — read category", () => {
-	it("returns undefined when path is missing and unchanged on non-parseable read message", async () => {
-		const { deps } = makeDeps();
-		const noPath = await processRoute(
-			{ category: "read", text: "x".repeat(600) },
-			makeCall("read", "r0"),
-			deps,
-		);
-		assert.equal(noPath, undefined);
+	it("returns undefined when path is missing and unchanged on non-parseable read message", () => {
+		return (async () => {
+			const { deps } = makeDeps();
+			const noPath = await processRoute(
+				{ category: "read", text: "x".repeat(600) },
+				makeCall("read", "r0"),
+				deps,
+			);
+			assert.equal(noPath, undefined);
 
-		const beyond = await processRoute(
-			{
-				category: "read",
-				path: "/repo/a.ts",
-				text: `[Line 999 is beyond end of file${" ".repeat(500)}]`,
-			},
-			makeCall("read", "r1", { path: "a.ts", offset: 999 }),
-			deps,
-		);
-		assert.ok(beyond);
-		assert.equal(beyond.text, undefined);
-		assert.equal(beyond.sample.mechanism, "none");
-		assert.equal(beyond.sample.outcome, "unchanged");
+			const beyond = await processRoute(
+				{
+					category: "read",
+					path: "/repo/a.ts",
+					text: `[Line 999 is beyond end of file${" ".repeat(500)}]`,
+				},
+				makeCall("read", "r1", { path: "a.ts", offset: 999 }),
+				deps,
+			);
+			assert.ok(beyond);
+			assert.equal(beyond.text, undefined);
+			assert.equal(beyond.sample.mechanism, "none");
+			assert.equal(beyond.sample.outcome, "unchanged");
+		})();
 	});
 
 	it("emits exact dedup stub preserving notice, and skips dedup once evicted from context", async () => {
@@ -218,6 +222,112 @@ describe("processRoute — read category", () => {
 		assert.ok(partial.text.includes(allLines[49] ?? ""));
 		// Omitted middle line must not appear
 		assert.equal(partial.text.includes(allLines[20] ?? ""), false);
+	});
+
+	it("clarifies subset readStub wording on explicit limit and truncates stale longer reads on unbounded EOF shrink", async () => {
+		const { deps, visible } = makeDeps();
+		const path = "/repo/src/shrink.ts";
+		const lines40 = makeLines(1, 40);
+		const full40 = lines40.join("\n");
+		await processRoute(
+			{ category: "read", path, text: full40 },
+			makeCall("read", "read-40", { path: "src/shrink.ts" }),
+			deps,
+		);
+		visible.set("read-40", full40);
+
+		// Explicit limit=20 -> read-40 stays intact, subset wording cites lines 1-20 within read-40 (lines 1-40)
+		const subset20 = lines40.slice(0, 20).join("\n");
+		const subRes = await processRoute(
+			{ category: "read", path, text: subset20 },
+			makeCall("read", "read-sub", {
+				path: "src/shrink.ts",
+				offset: 1,
+				limit: 20,
+			}),
+			deps,
+		);
+		assert.ok(subRes?.text);
+		assert.match(
+			subRes.text,
+			/identical to lines 1-20 within tool call read-40 \(which read lines 1-40\)/,
+		);
+
+		// Unbounded EOF read after file shrinks to 20 lines (no limit, no notice) -> evicts 40-line source so model sees new EOF!
+		const { deps: depsShrink, visible: visibleShrink } = makeDeps();
+		await processRoute(
+			{ category: "read", path, text: full40 },
+			makeCall("read", "read-40", { path: "src/shrink.ts" }),
+			depsShrink,
+		);
+		visibleShrink.set("read-40", full40);
+		const shrunkRes = await processRoute(
+			{ category: "read", path, text: subset20 },
+			makeCall("read", "read-shrunk", { path: "src/shrink.ts" }),
+			depsShrink,
+		);
+		assert.equal(shrunkRes?.text, undefined);
+
+		// Explicit limit larger than returned lines (limit=30, 20 lines, no notice) also proves shrunk EOF -> evicts 40-line source!
+		const { deps: depsLimitShrink, visible: visibleLimitShrink } = makeDeps();
+		await processRoute(
+			{ category: "read", path, text: full40 },
+			makeCall("read", "read-40", { path: "src/shrink.ts" }),
+			depsLimitShrink,
+		);
+		visibleLimitShrink.set("read-40", full40);
+		const limitShrunkRes = await processRoute(
+			{ category: "read", path, text: subset20 },
+			makeCall("read", "read-limit-shrunk", {
+				path: "src/shrink.ts",
+				offset: 1,
+				limit: 30,
+			}),
+			depsLimitShrink,
+		);
+		assert.equal(limitShrunkRes?.text, undefined);
+
+		// Partial overlap stub on externally edited tail evicts conflicting full-file source from ReadIndex!
+		const { deps: depsConflict, visible: visibleConflict } = makeDeps();
+		await processRoute(
+			{ category: "read", path, text: full40 },
+			makeCall("read", "read-old-40", { path: "src/shrink.ts" }),
+			depsConflict,
+		);
+		visibleConflict.set("read-old-40", full40);
+		const head25 = `${lines40.slice(0, 25).join("\n")}\n\n[15 more lines in file. Use offset=26 to continue.]`;
+		visibleConflict.delete("read-old-40");
+		await processRoute(
+			{ category: "read", path, text: head25 },
+			makeCall("read", "read-head-25", {
+				path: "src/shrink.ts",
+				offset: 1,
+				limit: 25,
+			}),
+			depsConflict,
+		);
+		visibleConflict.set("read-old-40", full40);
+		visibleConflict.set("read-head-25", head25);
+		const edited40 = [
+			...lines40.slice(0, 25),
+			...lines40.slice(25).map((l) => `${l} // edited`),
+		].join("\n");
+		const partialConflict = await processRoute(
+			{ category: "read", path, text: edited40 },
+			makeCall("read", "read-edited-40", { path: "src/shrink.ts" }),
+			depsConflict,
+		);
+		assert.equal(partialConflict?.sample.mechanism, "read-dedup");
+		const staleTail = lines40.slice(25).join("\n");
+		const afterConflict = await processRoute(
+			{ category: "read", path, text: staleTail, offset: 26 },
+			makeCall("read", "read-tail-check", {
+				path: "src/shrink.ts",
+				offset: 26,
+			}),
+			depsConflict,
+		);
+		assert.equal(afterConflict?.text, undefined);
 	});
 
 	it("handles widened pi-lens retry with read-forced and remains non-sticky on subsequent dedup", async () => {
@@ -484,7 +594,9 @@ describe("processRoute — read category", () => {
 		);
 		assert.ok(bashView?.text);
 		assert.ok(
-			bashView.text.includes("Read the file with the read tool for the exact text."),
+			bashView.text.includes(
+				"Read the file with the read tool for the exact text.",
+			),
 		);
 		assert.equal(reads.forcesFull(path, ANY_START), true);
 		assert.equal(reads.forcesFull(path, 1), true);
@@ -584,7 +696,11 @@ describe("processRoute — terminal category", () => {
 
 		// 1. Clean short wrapped output -> skips RTK and returns undefined
 		const clean = await processRoute(
-			{ category: "terminal", text: "clean wrapped line\n".repeat(40), wrapped: true },
+			{
+				category: "terminal",
+				text: "clean wrapped line\n".repeat(40),
+				wrapped: true,
+			},
 			makeCall("bash", "w-1", { command: "rtk git status" }),
 			deps,
 		);
@@ -620,7 +736,9 @@ describe("processRoute — terminal category", () => {
 
 		// 4. Clean wrapped JSON still applies lossless json-compact without calling RTK
 		const wrappedJson = JSON.stringify(
-			{ items: Array.from({ length: 20 }, (_, i) => ({ id: i, name: "item" })) },
+			{
+				items: Array.from({ length: 20 }, (_, i) => ({ id: i, name: "item" })),
+			},
 			null,
 			4,
 		);
@@ -638,7 +756,8 @@ describe("processRoute — terminal category", () => {
 		const { deps } = makeDeps();
 		const grepOut = Array.from(
 			{ length: 20 },
-			(_, i) => `src/deeply/nested/module/feature.ts:${i + 1}: const val${i} = needle;`,
+			(_, i) =>
+				`src/deeply/nested/module/feature.ts:${i + 1}: const val${i} = needle;`,
 		).join("\n");
 
 		for (const cmd of [
@@ -661,7 +780,9 @@ describe("processRoute — terminal category", () => {
 		);
 		assert.ok(rgRes?.text);
 		assert.equal(rgRes.sample.mechanism, "grep-group");
-		assert.ok(rgRes.text.startsWith("src/deeply/nested/module/feature.ts\n 1:"));
+		assert.ok(
+			rgRes.text.startsWith("src/deeply/nested/module/feature.ts\n 1:"),
+		);
 	});
 
 	it("preserves trailing bash trailer and RTK recall hint across lossless steps", async () => {
@@ -693,7 +814,7 @@ describe("processRoute — terminal category", () => {
 		assert.ok(res.text.endsWith(`\n\n${trailer}${hint}`));
 	});
 
-	it("falls back safely on RTK failure and still runs lossless rewrites when worthwhile", async () => {
+	it("falls back safely on RTK failure, still runs lossless rewrites on non-abort failures, and short-circuits aborted runs without mutating indexes", async () => {
 		const plain = "error line\n".repeat(80);
 		const { deps: failOnly } = makeDeps({
 			gate: () => true,
@@ -712,7 +833,9 @@ describe("processRoute — terminal category", () => {
 
 		// RTK fails, but lossless json-compact still compresses -> returns filtered + failure
 		const prettyJson = JSON.stringify(
-			{ records: Array.from({ length: 20 }, (_, i) => ({ index: i, ok: true })) },
+			{
+				records: Array.from({ length: 20 }, (_, i) => ({ index: i, ok: true })),
+			},
 			null,
 			4,
 		);
@@ -729,6 +852,21 @@ describe("processRoute — terminal category", () => {
 		assert.equal(res2.failure, "timeout");
 		assert.equal(res2.sample.outcome, "filtered");
 		assert.equal(res2.sample.mechanism, "json-compact");
+
+		// Aborted RTK step short-circuits immediately without lossless rewrite or passage recording
+		const bigParagraph = "aborted paragraph text ".repeat(20);
+		const { deps: abortedDeps, passages: abortedPassages } = makeDeps({
+			gate: () => true,
+			rtk: async () => ({ kind: "failed", reason: "aborted" }),
+		});
+		const abortedRes = await processRoute(
+			{ category: "terminal", text: `${bigParagraph}\n\n${prettyJson}` },
+			makeCall("bash", "f-aborted", { command: "curl http://localhost/api" }),
+			abortedDeps,
+		);
+		assert.equal(abortedRes?.text, undefined);
+		assert.equal(abortedRes?.failure, "aborted");
+		assert.deepEqual(abortedPassages.calls("bash", bigParagraph), []);
 	});
 });
 
@@ -737,7 +875,8 @@ describe("processRoute — listing category", () => {
 		const { deps } = makeDeps();
 		const grepOut = Array.from(
 			{ length: 20 },
-			(_, i) => `src/components/editor/LongComponentName.tsx:${i + 1}: handleChange()`,
+			(_, i) =>
+				`src/components/editor/LongComponentName.tsx:${i + 1}: handleChange()`,
 		).join("\n");
 
 		const grepRes = await processRoute(
@@ -921,7 +1060,9 @@ describe("processRoute — generic category", () => {
 	it("applies json-compact and grep-group on generic tool outputs and preserves RTK recall hint", async () => {
 		const hint = "\n[full output: rtk recall fedcba0123456789]";
 		const prettyJson = JSON.stringify(
-			{ results: Array.from({ length: 15 }, (_, i) => ({ id: i, score: 0.9 })) },
+			{
+				results: Array.from({ length: 15 }, (_, i) => ({ id: i, score: 0.9 })),
+			},
 			null,
 			4,
 		);
@@ -1131,7 +1272,8 @@ describe("rtk-pi-extended/index.ts — full extension hooks", () => {
 		// 1. Single-block grep result with structuredContent preserved
 		const grepOut = Array.from(
 			{ length: 20 },
-			(_, i) => `src/services/authentication/session.ts:${i + 1}: verifyToken(${i});`,
+			(_, i) =>
+				`src/services/authentication/session.ts:${i + 1}: verifyToken(${i});`,
 		).join("\n");
 		const structured = { matchCount: 20, truncated: false };
 		const grepRes = await harness.emitToolResult({
@@ -1213,7 +1355,10 @@ describe("rtk-pi-extended/index.ts — full extension hooks", () => {
 			input: { path: "src/file.ts" },
 			content: [{ type: "text", text: body }],
 		});
-		assert.ok(afterErrEdit?.content, "errored edit must not invalidate read dedup");
+		assert.ok(
+			afterErrEdit?.content,
+			"errored edit must not invalidate read dedup",
+		);
 
 		// Successful edit -> invalidates ReadIndex (and clears replaced marker)
 		await harness.emitToolResult({
@@ -1229,7 +1374,11 @@ describe("rtk-pi-extended/index.ts — full extension hooks", () => {
 			input: { path: "src/file.ts" },
 			content: [{ type: "text", text: body }],
 		});
-		assert.equal(afterOkEdit, undefined, "successful edit must invalidate ReadIndex");
+		assert.equal(
+			afterOkEdit,
+			undefined,
+			"successful edit must invalidate ReadIndex",
+		);
 		harness.addProjectionToolResult("r3", body);
 
 		// Failed write -> MUST NOT invalidate ReadIndex
@@ -1246,7 +1395,10 @@ describe("rtk-pi-extended/index.ts — full extension hooks", () => {
 			input: { path: "src/file.ts" },
 			content: [{ type: "text", text: body }],
 		});
-		assert.ok(afterErrWrite?.content, "errored write must not invalidate read dedup");
+		assert.ok(
+			afterErrWrite?.content,
+			"errored write must not invalidate read dedup",
+		);
 
 		// Successful write -> invalidates ReadIndex
 		await harness.emitToolResult({
@@ -1262,7 +1414,11 @@ describe("rtk-pi-extended/index.ts — full extension hooks", () => {
 			input: { path: "src/file.ts" },
 			content: [{ type: "text", text: body }],
 		});
-		assert.equal(afterOkWrite, undefined, "successful write must invalidate ReadIndex");
+		assert.equal(
+			afterOkWrite,
+			undefined,
+			"successful write must invalidate ReadIndex",
+		);
 	});
 
 	it("appends validated rtk-pi-extended custom entry on turn_end and resets state across session lifecycle events", async () => {
@@ -1372,6 +1528,53 @@ describe("rtk-pi-extended/index.ts — full extension hooks", () => {
 			content: [{ type: "text", text: grepOut }],
 		});
 		assert.ok(afterRestart?.content);
+	});
+
+	it("suppresses stale ledger/warning/index commits when session_tree fires mid-flight during RTK subprocess", async () => {
+		const dir = await makeTempDir("rtk-ext-midflight-");
+		const sessionDir = join(dir, "sessions");
+		await mkdir(sessionDir);
+		const startedFile = join(dir, "started");
+		await createFakeRtk(
+			dir,
+			`
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(startedFile)}, "1", "utf8");
+setTimeout(() => {
+	process.exit(2);
+}, 120);
+`,
+		);
+
+		const prevPath = process.env.PATH;
+		process.env.PATH = `${dir}:${prevPath ?? ""}`;
+		try {
+			const harness = createExtensionHarness({ sessionDir });
+			const noisy = `${"\u001b[32mnoisy line\u001b[0m\n".repeat(40)}done`;
+			const pending = harness.emitToolResult({
+				toolName: "bash",
+				toolCallId: "mid-1",
+				input: { command: "make build" },
+				content: [{ type: "text", text: noisy }],
+			});
+			// Wait briefly for fake RTK to start, then switch session_tree mid-flight
+			for (let i = 0; i < 30; i++) {
+				const ok = await readFile(startedFile, "utf8").then(
+					() => true,
+					() => false,
+				);
+				if (ok) break;
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			harness.emitSessionTree();
+			const res = await pending;
+			assert.equal(res, undefined);
+			assert.equal(harness.notifications.length, 0);
+			assert.equal(harness.emitTurnEnd(), undefined);
+		} finally {
+			if (prevPath === undefined) delete process.env.PATH;
+			else process.env.PATH = prevPath;
+		}
 	});
 
 	it("bypasses filtering completely when RTK_DISABLED=1", async () => {
@@ -1559,7 +1762,11 @@ if (mode === "happy") {
 				}),
 			);
 		}
-		await writeFile(join(sessionDir, "s1.jsonl"), `${lines.join("\n")}\n`, "utf8");
+		await writeFile(
+			join(sessionDir, "s1.jsonl"),
+			`${lines.join("\n")}\n`,
+			"utf8",
+		);
 
 		const harness = createExtensionHarness({ sessionDir });
 
@@ -1574,14 +1781,22 @@ if (mode === "happy") {
 			const command = args[2] ?? "";
 			const idx = Number(/customcmd-(\d+)/.exec(command)?.[1] ?? "-1");
 			if (idx % 2 === 0) {
-				return { stdout: `rtk ${command}\n`, stderr: "", code: 0, killed: false };
+				return {
+					stdout: `rtk ${command}\n`,
+					stderr: "",
+					code: 0,
+					killed: false,
+				};
 			}
 			return { stdout: "", stderr: "", code: 1, killed: false };
 		});
 		await harness.runCoverage("7 project");
 		assert.equal(harness.notifications.length, 1);
 		assert.equal(harness.notifications[0]?.level, "info");
-		assert.match(harness.notifications[0]?.message ?? "", /rewritten.*20 results/);
+		assert.match(
+			harness.notifications[0]?.message ?? "",
+			/rewritten.*20 results/,
+		);
 		assert.match(
 			harness.notifications[0]?.message ?? "",
 			/not rewritten.*20 results/,

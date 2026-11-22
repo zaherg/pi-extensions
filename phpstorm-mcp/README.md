@@ -13,10 +13,10 @@ It is not an ACP adapter or an MCP server itself; Pi's built-in MCP support hand
 
 ## What it does
 
-At `session_start`, the extension checks `ctx.mode`:
+At `session_start`, the extension checks `ctx.mode` and CLI flags:
 
-- In RPC mode, it checks whether PhpStorm is running locally before reading (or creating) `~/.pi/agent/pi-phpstorm-mcp.json` and registering the server as `phpstorm`.
-- If PhpStorm is closed, it silently skips configuration loading and registration.
+- In RPC mode (unless `--no-mcp` is passed before `--`), it checks whether PhpStorm is running locally before reading (or creating) `~/.pi/agent/pi-phpstorm-mcp.json` and registering the server as `phpstorm`.
+- If PhpStorm is closed or `--no-mcp` is active, it silently skips configuration loading and registration.
 - In terminal UI, print, and JSON modes, it does not inspect applications, read or create the configuration, or register the server.
 
 Loading the extension for discovery alone does not register a server.
@@ -28,7 +28,7 @@ It checks at session startup only, without polling or launching PhpStorm.
 After opening PhpStorm, restart the ACP/RPC session to enable the connection.
 Closing PhpStorm after registration does not unregister the server; Pi handles the disconnected connection.
 
-On macOS, detection uses the running GUI application's `com.jetbrains.PhpStorm` bundle identifier, excluding background stdio bridges.
+On macOS, detection uses the running GUI application's `com.jetbrains.PhpStorm` or `com.jetbrains.PhpStorm-EAP` bundle identifier, excluding background stdio bridges.
 On Linux, it checks native `phpstorm`/`phpstorm64` processes or a Java process with `-Didea.platform.prefix=PhpStorm`.
 On Windows, it checks `phpstorm.exe`/`phpstorm64.exe` through PowerShell's process query, running `powershell.exe` by its absolute `%SystemRoot%\System32` path.
 Linux and Windows checks exclude processes whose arguments contain `stdioMcpServer`.
@@ -69,7 +69,7 @@ Keep a local checkout in place because Pi loads local packages from their origin
 
 The extension reads `~/.pi/agent/pi-phpstorm-mcp.json` at the start of each RPC session when PhpStorm is running and registers it as `phpstorm`.
 The file contains one MCP server configuration object, without an `mcpServers` wrapper.
-If the file does not exist yet, the extension creates it atomically (with `0600` permissions) using the current user's home directory and JetBrains Toolbox's standard macOS path:
+If the file does not exist yet, the extension creates it atomically (with `0600` permissions) using the first installed PhpStorm binary found across `~/Applications/PhpStorm.app`, `~/Applications/PhpStorm EAP.app`, `/Applications/PhpStorm.app`, and `/Applications/PhpStorm EAP.app` (falling back to `~/Applications/PhpStorm.app/Contents/MacOS/phpstorm`):
 
 ```json
 {
@@ -84,7 +84,7 @@ If the file does not exist yet, the extension creates it atomically (with `0600`
 }
 ```
 
-If PhpStorm is installed elsewhere (for example `/Applications/PhpStorm.app/...` or on Linux/Windows) or uses a different MCP port, edit `~/.pi/agent/pi-phpstorm-mcp.json` with the executable path, arguments, and port supplied by PhpStorm's MCP settings, then restart the Pi ACP session.
+If PhpStorm is installed in a non-standard location (or on Linux/Windows) or uses a different MCP port, edit `~/.pi/agent/pi-phpstorm-mcp.json` with the executable path, arguments, and port supplied by PhpStorm's MCP settings, then restart the Pi ACP session.
 An existing file replaces the defaults completely rather than merging with them.
 Unreadable files and malformed JSON report an error with the file path without overwriting the file.
 Pi validates the server configuration and rejects invalid settings.
@@ -95,7 +95,7 @@ The extension does not disable or remove independently configured servers.
 
 ## Verification
 
-Run static typechecking and linting from the repository root with Node.js 22.19 or later:
+Run static typechecking, linting, and tests from the repository root with Node.js 22.19 or later:
 
 ```sh
 npm run check

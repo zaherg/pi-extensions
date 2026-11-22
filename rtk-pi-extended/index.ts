@@ -57,9 +57,16 @@ function show(
 	message: string,
 	level: NotifyLevel,
 ): void {
-	if (ctx.hasUI) ctx.ui.notify(message, level);
+	try {
+		if (ctx.hasUI) {
+			ctx.ui.notify(message, level);
+			return;
+		}
+	} catch {
+		// Fall back to stderr when a stale extension context cannot access UI.
+	}
 	// Write diagnostics to stderr so JSON or RPC stdout streams stay clean.
-	else process.stderr.write(`${message}\n`);
+	process.stderr.write(`${message}\n`);
 }
 
 function textOf(content: readonly (TextContent | ImageContent)[]): string {
@@ -72,6 +79,8 @@ function textOf(content: readonly (TextContent | ImageContent)[]): string {
 export default function rtkPiExtended(pi: ExtensionAPI): void {
 	const pipelines = join(dirname(fileURLToPath(import.meta.url)), "rtk");
 	let lifetime = new AbortController();
+	let indexEpoch = 0;
+	let turnEpoch = 0;
 	const pending = new Set<Promise<Processed | undefined>>();
 	const reported = new Set<Failure>();
 	const ledger = new Ledger();
@@ -96,19 +105,24 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 
 	/** Return model-visible tool results, rebuilding only when the session leaf moves. */
 	const contextOf = (ctx: ExtensionContext) => (): ContextResults => {
-		const leaf = ctx.sessionManager.getLeafId();
-		if (contextCache?.leaf === leaf) return contextCache.results;
-		const results = new Map<string, string>();
-		for (const message of ctx.sessionManager.buildSessionProjection()
-			.messages) {
-			if (message.role === "toolResult")
-				results.set(message.toolCallId, textOf(message.content));
+		try {
+			const leaf = ctx.sessionManager.getLeafId();
+			if (contextCache?.leaf === leaf) return contextCache.results;
+			const results = new Map<string, string>();
+			for (const message of ctx.sessionManager.buildSessionProjection()
+				.messages) {
+				if (message.role === "toolResult")
+					results.set(message.toolCallId, textOf(message.content));
+			}
+			contextCache = { leaf, results };
+			return results;
+		} catch {
+			return new Map();
 		}
-		contextCache = { leaf, results };
-		return results;
 	};
 
 	const forget = (): void => {
+		indexEpoch++;
 		reads.clear();
 		passages.clear();
 		contextCache = undefined;
@@ -117,6 +131,7 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 	pi.on("session_start", (): void => {
 		lifetime.abort();
 		lifetime = new AbortController();
+		turnEpoch++;
 		recallVerified = false;
 		reported.clear();
 		ledger.clear();
@@ -125,6 +140,7 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 	// Clear cached indexes on compaction or branch switches to free memory.
 	pi.on("session_compact", forget);
 	pi.on("session_tree", (): void => {
+		turnEpoch++;
 		ledger.clear();
 		forget();
 	});
@@ -136,30 +152,35 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 			ctx: ExtensionContext,
 		): Promise<ToolResultEventResult | undefined> => {
 			const sessionSignal = lifetime.signal;
+			const callSignal = ctx.signal;
 			if (
 				process.env.RTK_DISABLED === "1" ||
 				sessionSignal.aborted ||
-				ctx.signal?.aborted
+				callSignal?.aborted
 			)
 				return undefined;
+			const { cwd } = ctx;
 			if (
 				(event.toolName === "edit" || event.toolName === "write") &&
 				!event.isError &&
 				typeof event.input.path === "string"
 			)
-				reads.invalidate(resolvePath(event.input.path, ctx.cwd));
-			const route = select(event, ctx.cwd);
+				reads.invalidate(resolvePath(event.input.path, cwd));
+			const route = select(event, cwd);
 			const block = event.content[0];
 			if (!route || block?.type !== "text") return undefined;
-			const signal = ctx.signal
-				? AbortSignal.any([ctx.signal, sessionSignal])
+			const signal = callSignal
+				? AbortSignal.any([callSignal, sessionSignal])
 				: sessionSignal;
+			const indexGen = indexEpoch;
+			const turnGen = turnEpoch;
 			const deps: Dependencies = {
-				cwd: ctx.cwd,
+				cwd,
 				gate,
 				context: contextOf(ctx),
 				reads,
 				passages,
+				canCommit: () => !signal.aborted && indexGen === indexEpoch,
 				rtk: async (
 					tool: string,
 					text: string,
@@ -173,7 +194,8 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 						structureCheck(pipeline),
 						verify,
 					);
-					if (verify && result.kind === "filtered") recallVerified = true;
+					if (verify && result.kind === "filtered" && turnGen === turnEpoch)
+						recallVerified = true;
 					return result;
 				},
 			};
@@ -181,7 +203,12 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 			pending.add(work);
 			try {
 				const processed = await work;
-				if (!processed || signal.aborted || processed.failure === "aborted")
+				if (
+					!processed ||
+					signal.aborted ||
+					processed.failure === "aborted" ||
+					turnGen !== turnEpoch
+				)
 					return undefined;
 				ledger.record(processed.sample);
 				if (processed.failure) warn(processed.failure, ctx);
@@ -204,7 +231,7 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 				};
 			} catch {
 				// Never expose subprocess output or tool content through diagnostics.
-				warn("unexpected", ctx);
+				if (!signal.aborted && turnGen === turnEpoch) warn("unexpected", ctx);
 				return undefined;
 			} finally {
 				pending.delete(work);
@@ -273,11 +300,8 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 			const { options } = parsed;
 			const since = windowStart(options.days);
 			try {
-				const files = await sessionFiles(
-					ctx.sessionManager.getSessionDir(),
-					options.scope,
-					since,
-				);
+				const sessionDir = ctx.sessionManager.getSessionDir();
+				const files = await sessionFiles(sessionDir, options.scope, since);
 				if (signal.aborted) return;
 				const scan = await scanSessions(files, since);
 				if (signal.aborted) return;
@@ -305,6 +329,7 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async (): Promise<void> => {
 		lifetime.abort();
+		turnEpoch++;
 		ledger.clear();
 		forget();
 		await Promise.allSettled([...pending]);

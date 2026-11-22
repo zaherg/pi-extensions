@@ -1,5 +1,9 @@
 import { errorResult, MAX_BYTES, ProgressError, runProgress } from "./store.ts";
 
+process.stdout.on("error", (err: NodeJS.ErrnoException): void => {
+	if (err.code === "EPIPE") process.exit(0);
+});
+
 async function main(): Promise<void> {
 	const args = process.argv.slice(2);
 	if (args.length === 1 && args[0] === "--help") {

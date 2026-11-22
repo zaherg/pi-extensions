@@ -30,18 +30,26 @@ function contextLine(
 	return /^-\d+-/.test(rest) ? { path, rest } : undefined;
 }
 
-function parseGrep(lines: readonly string[]): (GrepLine | undefined)[] {
+function parseGrep(
+	lines: readonly string[],
+	eligible: readonly boolean[],
+): (GrepLine | undefined)[] {
 	const parsed: (GrepLine | undefined)[] = lines.map(
-		(line: string): GrepLine | undefined => {
+		(line: string, index: number): GrepLine | undefined => {
+			if (!eligible[index]) return undefined;
 			const path = MATCH.exec(line)?.[1];
 			return path !== undefined && isGrepPath(path)
 				? { path, rest: line.slice(path.length) }
 				: undefined;
 		},
 	);
-	// Propagate file paths across trailing and leading context lines.
+	// Propagate file paths across trailing and leading context lines outside fenced blocks.
 	let previous: string | undefined;
 	for (let index = 0; index < lines.length; index++) {
+		if (!eligible[index]) {
+			previous = undefined;
+			continue;
+		}
 		const line = lines[index] ?? "";
 		const found = parsed[index] ?? contextLine(line, previous);
 		parsed[index] = found;
@@ -49,6 +57,10 @@ function parseGrep(lines: readonly string[]): (GrepLine | undefined)[] {
 	}
 	let next: string | undefined;
 	for (let index = lines.length - 1; index >= 0; index--) {
+		if (!eligible[index]) {
+			next = undefined;
+			continue;
+		}
 		const line = lines[index] ?? "";
 		const found = parsed[index] ?? contextLine(line, next);
 		parsed[index] = found;
@@ -86,12 +98,14 @@ export function ungroupGrep(text: string): string {
 	return out.join("\n");
 }
 
-/** Group consecutive grep lines by file path while preserving line order. */
+/** Group consecutive grep lines by file path outside fenced code blocks while preserving line order. */
 export function groupGrep(text: string): string | undefined {
 	const lines = text.split("\n");
 	// Skip output that already uses grouped line prefixes.
 	if (lines.some((line: string) => COMPACT.test(line))) return undefined;
-	const parsed = parseGrep(lines);
+	const { eligible, unclosed } = unfencedMask(lines);
+	if (unclosed) return undefined;
+	const parsed = parseGrep(lines, eligible);
 	const out: string[] = [];
 	let current: string | undefined;
 	for (let index = 0; index < lines.length; index++) {

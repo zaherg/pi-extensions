@@ -148,9 +148,9 @@ Connects `pi-acp` sessions running inside JetBrains IDEs to PhpStorm's built-in 
 ### How it works
 
 At `session_start`, the extension:
-1. Checks `ctx.mode === "rpc"`. Non-RPC sessions (`tui`, `print`, `json`) return immediately without running OS process checks, reading configuration, or registering any server.
+1. Checks `ctx.mode === "rpc"` and skips registration when `--no-mcp` was passed before `--`. Non-RPC sessions (`tui`, `print`, `json`) and `--no-mcp` sessions return immediately without running OS process checks, reading configuration, or registering any server.
 2. Checks whether the **PhpStorm GUI** is currently running on the host (`isPhpStormRunning`), explicitly ignoring leftover `stdioMcpServer` bridge processes:
-   - **macOS (`darwin`):** Queries `NSRunningApplication` via `/usr/bin/osascript` (JXA) for bundle identifier `com.jetbrains.PhpStorm` with non-terminated regular GUI activation policy (`0`).
+   - **macOS (`darwin`):** Queries `NSRunningApplication` via `/usr/bin/osascript` (JXA) for bundle identifiers `com.jetbrains.PhpStorm` and `com.jetbrains.PhpStorm-EAP` with non-terminated regular GUI activation policy (`0`).
    - **Linux (`linux`):** Runs `ps -Aww -o comm= -o args=` and matches `phpstorm`, `phpstorm64`, or `java` with `-Didea.platform.prefix=PhpStorm`, excluding `stdioMcpServer` arguments.
    - **Windows (`win32`):** Queries `Win32_Process` via `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` (absolute, never resolved from the working directory) for `phpstorm64.exe` or `phpstorm.exe`, excluding `stdioMcpServer` command lines.
    - Process checks have a **2-second timeout** and **1 MiB output limit**, and sanitize child-process errors so process arguments are never leaked.
@@ -178,7 +178,7 @@ At `session_start`, the extension:
 
 ### Caveats
 
-- **Auto-created defaults (`~/.pi/agent/pi-phpstorm-mcp.json`):** If the file is missing (`ENOENT`), it is created (`0600`) with `~/Applications/PhpStorm.app/Contents/MacOS/phpstorm` (derived from `os.homedir()`) and port `64442`. Edit it if PhpStorm is installed elsewhere or uses another port; an existing file replaces the defaults completely (no field merging), and unreadable files or invalid JSON throw an error without overwriting the file.
+- **Auto-created defaults (`~/.pi/agent/pi-phpstorm-mcp.json`):** If the file is missing (`ENOENT`), it is created (`0600`) with port `64442` and the first PhpStorm binary found across `~/Applications/PhpStorm.app`, `~/Applications/PhpStorm EAP.app`, `/Applications/PhpStorm.app`, and `/Applications/PhpStorm EAP.app` (falling back to `~/Applications/PhpStorm.app/Contents/MacOS/phpstorm`). Edit it if PhpStorm is installed elsewhere or uses another port; an existing file replaces the defaults completely (no field merging), and unreadable files or invalid JSON throw an error without overwriting the file.
 - **Avoid duplicate `mcp.json` entries:** Defining `phpstorm` in global or project `mcp.json` overrides `registerMcpServer` and connects in every Pi mode regardless of whether PhpStorm is open.
 - **Session-start check only:** The extension does not launch PhpStorm, poll for IDE startup/shutdown mid-session, distinguish JetBrains from other RPC clients while PhpStorm is open, or health-check the MCP port. If PhpStorm is started after the RPC session, restart the session.
 

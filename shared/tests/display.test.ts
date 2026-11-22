@@ -13,6 +13,9 @@ describe("redactSecrets", () => {
 				"const count = 42; // normal assignment",
 				"NotBearer abc123def456 and MyBasic dXNlcjpwYXNz==",
 				"Short lookalikes: sk-short123 ghp_tooshort AKIA12345678901",
+				"file:///Users/dev/project/test@2x.png",
+				'{"tokens": []}',
+				"secrets:\n  - public_item_1\n  - public_item_2",
 			];
 			for (const sample of samples) {
 				assert.equal(redactSecrets(sample), sample);
@@ -23,10 +26,13 @@ describe("redactSecrets", () => {
 			const inputs = [
 				"token=abc123",
 				'{"password": "my-secret"}',
+				'{"tokens": ["secret-one", "secret-two"]}',
 				"Authorization: Bearer eyJabc123",
-				"https://api.example.com/v1?token=t3&page=1#top",
+				"https://api.example.com/v1?token=t3&client_secret=s4&page=1#access_token=f5&state=ok",
 				"https://user:pass@example.com/repo",
+				"postgres://dbuser:dbpass@localhost:5432/app",
 				"-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
+				"-----BEGIN PGP PRIVATE KEY BLOCK-----\nabc\n-----END PGP PRIVATE KEY BLOCK-----",
 			];
 			for (const input of inputs) {
 				const once = redactSecrets(input);
@@ -36,7 +42,7 @@ describe("redactSecrets", () => {
 	});
 
 	describe("PEM private keys", () => {
-		it("redacts full PEM blocks of multiple key types while preserving surrounding text", () => {
+		it("redacts full PEM and PGP blocks of multiple key types while preserving surrounding text", () => {
 			const rsa =
 				"before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA12345\nline2\n-----END RSA PRIVATE KEY-----\nafter";
 			assert.equal(redactSecrets(rsa), "before\n[REDACTED PRIVATE KEY]\nafter");
@@ -52,15 +58,16 @@ describe("redactSecrets", () => {
 			const encrypted =
 				"-----BEGIN ENCRYPTED PRIVATE KEY-----\nencrypted-body\n-----END ENCRYPTED PRIVATE KEY-----";
 			assert.equal(redactSecrets(encrypted), "[REDACTED PRIVATE KEY]");
+
+			const pgp =
+				"-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYB...\n-----END PGP PRIVATE KEY BLOCK-----";
+			assert.equal(redactSecrets(pgp), "[REDACTED PRIVATE KEY]");
 		});
 
 		it("redacts truncated PEM blocks missing END or missing BEGIN", () => {
 			const missingEnd =
 				"header\n-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIabcdef";
-			assert.equal(
-				redactSecrets(missingEnd),
-				"header\n[REDACTED PRIVATE KEY]",
-			);
+			assert.equal(redactSecrets(missingEnd), "header\n[REDACTED PRIVATE KEY]");
 
 			const missingBegin =
 				"leftover-base64-lines\nmore-key-data\n-----END PRIVATE KEY-----\ntrailer";
@@ -105,10 +112,7 @@ describe("redactSecrets", () => {
 				redactSecrets("authorization: bearer my.token-value_1"),
 				"authorization: bearer [REDACTED]",
 			);
-			assert.equal(
-				redactSecrets("BASIC YWRtaW46c2VjcmV0"),
-				"BASIC [REDACTED]",
-			);
+			assert.equal(redactSecrets("BASIC YWRtaW46c2VjcmV0"), "BASIC [REDACTED]");
 		});
 
 		it("respects word boundaries before Bearer and Basic", () => {
@@ -122,6 +126,7 @@ describe("redactSecrets", () => {
 			const keys = [
 				"password",
 				"passwd",
+				"passphrase",
 				"secret",
 				"token",
 				"api_key",
@@ -130,6 +135,12 @@ describe("redactSecrets", () => {
 				"access_key",
 				"access-key",
 				"accesskey",
+				"private_key",
+				"private-key",
+				"signing_key",
+				"master_key",
+				"encryption_key",
+				"client_key",
 			];
 			for (const key of keys) {
 				assert.equal(redactSecrets(`${key}=mySecret123`), `${key}=[REDACTED]`);
@@ -140,7 +151,7 @@ describe("redactSecrets", () => {
 			}
 		});
 
-		it("redacts double-quoted and single-quoted values including escaped quotes and unterminated lines", () => {
+		it("redacts double-quoted, single-quoted, escaped single-quoted, and inline array secret values", () => {
 			assert.equal(
 				redactSecrets('{"password": "my \\"quoted\\" secret", "ok": 1}'),
 				'{"password": [REDACTED], "ok": 1}',
@@ -148,6 +159,18 @@ describe("redactSecrets", () => {
 			assert.equal(
 				redactSecrets("password='my single quoted secret' next=ok"),
 				"password=[REDACTED] next=ok",
+			);
+			assert.equal(
+				redactSecrets("password='abc\\'leaked' next=ok"),
+				"password=[REDACTED] next=ok",
+			);
+			assert.equal(
+				redactSecrets('{"tokens": ["tok-1", "tok-2"], "count": 2}'),
+				'{"tokens": [REDACTED], "count": 2}',
+			);
+			assert.equal(
+				redactSecrets("secrets: ['s1', 's2']"),
+				"secrets: [REDACTED]",
 			);
 			assert.equal(
 				redactSecrets('secret="unterminated-value\nnext-line=safe'),
@@ -234,8 +257,8 @@ describe("redactSecrets", () => {
 		});
 	});
 
-	describe("signed URL query parameters", () => {
-		it("redacts AWS, Google, and generic auth query parameters while keeping other params and fragments", () => {
+	describe("signed URL query and fragment parameters", () => {
+		it("redacts AWS, Google, OAuth fragment, and prefixed auth parameters while keeping other params", () => {
 			const awsUrl =
 				"https://bucket.s3.amazonaws.com/file.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAEXAMPLE%2F2026&X-Amz-Security-Token=FwoGZXIvYXdz&X-Amz-Signature=deadbeef1234#frag";
 			assert.equal(
@@ -251,25 +274,31 @@ describe("redactSecrets", () => {
 			);
 
 			const genericUrl =
-				"https://api.example.com/v1?sig=s1&signature=s2&token=t3&api_key=k4&api-key=k5&apikey=k6&key=k7&page=1";
+				"https://api.example.com/v1?sig=s1&signature=s2&token=t3&api_key=k4&api-key=k5&apikey=k6&key=k7&client_secret=s8&page=1#access_token=f9&state=xyz";
 			assert.equal(
 				redactSecrets(genericUrl),
-				"https://api.example.com/v1?sig=[REDACTED]&signature=[REDACTED]&token=[REDACTED]&api_key=[REDACTED]&api-key=[REDACTED]&apikey=[REDACTED]&key=[REDACTED]&page=1",
+				"https://api.example.com/v1?sig=[REDACTED]&signature=[REDACTED]&token=[REDACTED]&api_key=[REDACTED]&api-key=[REDACTED]&apikey=[REDACTED]&key=[REDACTED]&client_secret=[REDACTED]&page=1#access_token=[REDACTED]&state=xyz",
 			);
 		});
 	});
 
 	describe("standalone provider tokens", () => {
-		it("redacts sk-, ghp_, gho_, ghu_, ghs_, ghr_, github_pat_, and AKIA tokens", () => {
+		it("redacts OpenAI/Anthropic, Stripe, GitHub, GitLab, Slack, AWS, and age tokens", () => {
 			const tokens = [
 				"sk-proj_1234567890abcdef",
+				"sk_live_0123456789abcdefghij",
+				"rk_live_0123456789abcdefghij",
 				"ghp_1234567890abcdefghij",
 				"gho_ABCDEFGHIJ0123456789",
 				"ghu_0123456789abcdefghij",
 				"ghs_0123456789abcdefghij",
 				"ghr_0123456789abcdefghij",
 				"github_pat_11AAABBBCCC_0123456789abcdef",
+				"glpat-1234567890abcdefghij",
+				"xoxb-1234567890-1234567890-abcdef",
 				"AKIAIOSFODNN7EXAMPLE",
+				"ASIAIOSFODNN7EXAMPLE",
+				`AGE-SECRET-KEY-1${"Q".repeat(58)}`,
 			];
 			for (const token of tokens) {
 				assert.equal(
@@ -280,13 +309,14 @@ describe("redactSecrets", () => {
 			}
 		});
 
-		it("does not redact tokens that fail minimum length or AKIA exact length", () => {
+		it("does not redact tokens that fail minimum length or AKIA/ASIA exact length", () => {
 			const nonTokens = [
 				"sk-123456789012345",
 				"ghp_1234567890123456789",
 				"github_pat_1234567890123456789",
 				"AKIA123456789012345",
 				"AKIA12345678901234567",
+				"ASIA12345678901234567",
 			];
 			for (const value of nonTokens) {
 				assert.equal(redactSecrets(value), value);
@@ -294,8 +324,8 @@ describe("redactSecrets", () => {
 		});
 	});
 
-	describe("URL userinfo", () => {
-		it("redacts user:password in http/https URLs including passwords containing @", () => {
+	describe("URI userinfo", () => {
+		it("redacts user:password in http/https and database/service URIs including passwords containing @", () => {
 			assert.equal(
 				redactSecrets("git clone https://alice:s3cr3t@github.com/org/repo.git"),
 				"git clone https://[REDACTED]@github.com/org/repo.git",
@@ -308,6 +338,18 @@ describe("redactSecrets", () => {
 				redactSecrets("https://user:p@ss@w0rd!@git.example.com/team/app.git"),
 				"https://[REDACTED]@git.example.com/team/app.git",
 			);
+			assert.equal(
+				redactSecrets("postgres://admin:s3cr3t@db.internal:5432/prod"),
+				"postgres://[REDACTED]@db.internal:5432/prod",
+			);
+			assert.equal(
+				redactSecrets("redis://:redispass@cache.internal:6379/0"),
+				"redis://[REDACTED]@cache.internal:6379/0",
+			);
+			assert.equal(
+				redactSecrets("mongodb+srv://svc:pa55@cluster0.example.net/app"),
+				"mongodb+srv://[REDACTED]@cluster0.example.net/app",
+			);
 		});
 
 		it("does not match across path, query, fragment, whitespace, or delimiters to a later @", () => {
@@ -317,6 +359,7 @@ describe("redactSecrets", () => {
 				"https://example.com#section@1",
 				"https://example.com email@host.com",
 				'{"url":"https://example.com","email":"a@b.com"}',
+				"{'url':'https://example.com','email':'a@b.com'}",
 			];
 			for (const sample of samples) {
 				assert.equal(redactSecrets(sample), sample);
@@ -330,6 +373,14 @@ describe("redactSecrets", () => {
 				{
 					name: "unterminated double-quoted secret",
 					input: `password="${"a".repeat(60_000)}`,
+				},
+				{
+					name: "unterminated single-quoted secret with escapes",
+					input: `password='${"\\'".repeat(30_000)}`,
+				},
+				{
+					name: "unclosed array secret",
+					input: `tokens=[${'"a", '.repeat(12_000)}`,
 				},
 				{
 					name: "single JSON-escaped backslash flood",
@@ -406,6 +457,24 @@ describe("displayLabel", () => {
 		);
 	});
 
+	it("redacts headless PEM blocks whose END marker appears past 1024 characters even with ANSI or zero-width chars", () => {
+		const body = `${"MIIEpAIBAAKCAQEA".repeat(80)}\n`;
+		for (const footer of [
+			"-----END RSA PRIVATE KEY-----",
+			"-----END RSA PRIVATE \x1b[31mK\x1b[0mEY-----",
+			"-----END RSA PRIVATE\u200b KEY-----",
+		]) {
+			const headlessPem = `${body}${footer}\nafter`;
+			assert.ok(headlessPem.indexOf("-----END") > 1024);
+			const label = displayLabel(headlessPem, 120);
+			assert.ok(
+				!label.includes("MIIEpAIBAAKCAQEA"),
+				`PEM body leaked: ${label}`,
+			);
+			assert.match(label, /\[REDACTED PRIVATE KEY\]/);
+		}
+	});
+
 	it("truncates text exceeding limit with ellipsis", () => {
 		assert.equal(displayLabel("abcdefghij", 6), "abcde…");
 		assert.equal(displayLabel("abcdef", 1), "…");
@@ -422,10 +491,11 @@ describe("displayLabel", () => {
 		assert.ok(label.endsWith("…"));
 	});
 
-	it("handles >1024-char single-word and whitespace-only inputs", () => {
+	it("handles >1024-char and >16k-char single-word and whitespace-only inputs", () => {
 		assert.equal(displayLabel("a".repeat(1030), 40), "…");
 		assert.equal(displayLabel(`sk-${"a".repeat(1030)}`, 40), "…");
 		assert.equal(displayLabel(" ".repeat(1100), 40), "");
+		assert.equal(displayLabel(" ".repeat(50_000), 40), "");
 		assert.equal(displayLabel("\x1b[31m\x00\u200b\n\t  ", 40), "");
 		assert.equal(displayLabel("", 40), "");
 	});
@@ -470,7 +540,8 @@ describe("displayTail", () => {
 	});
 
 	it("drops the partial first line and adds truncation header when cut=true", () => {
-		const text = "partial_secret_suffix_without_prefix\nsecond line\nthird line";
+		const text =
+			"partial_secret_suffix_without_prefix\nsecond line\nthird line";
 		assert.equal(
 			displayTail(text, true, "(no output)"),
 			"[Last output only]\nsecond line\nthird line",

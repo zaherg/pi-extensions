@@ -336,7 +336,7 @@ describe("wipExtension", () => {
 			]);
 		});
 
-		it("reports missing git when resolveExecutable returns undefined", async () => {
+		it("reports missing git when resolveExecutable returns undefined or POSIX pi.exec reports spawn ENOENT", async () => {
 			const platformDescriptor = Object.getOwnPropertyDescriptor(
 				process,
 				"platform",
@@ -368,6 +368,21 @@ describe("wipExtension", () => {
 					process.env.PATH = originalPath;
 				}
 			}
+
+			// On macOS/Linux, pi.exec resolves spawn ENOENT via ExecResult rather than throwing.
+			const posixMissing = setupWipExtension(async () => ({
+				stdout: "",
+				stderr: "spawn git ENOENT",
+				code: 1,
+				killed: false,
+				truncated: false,
+			}));
+			const posixCtx = createCommandContext();
+			await posixMissing.handler("", posixCtx.ctx);
+			assert.equal(posixMissing.calls.length, 1);
+			assert.deepEqual(posixCtx.notifications, [
+				{ message: "git was not found on PATH.", level: "error" },
+			]);
 		});
 	});
 
@@ -557,15 +572,44 @@ describe("wipExtension", () => {
 			assert.deepEqual(ctx2.notifications, []);
 		});
 
-		it("session_start aborts any prior controller and re-enables /wip with a fresh signal", async () => {
-			const gate = createDeferred<ExecResult>();
+		it("handles session.dispose() stale ExtensionCommandContext getters mid-flight without unhandled rejection", async () => {
+			const addGate = createDeferred<ExecResult>();
+			const harness = setupWipExtension(async (_cmd, args) => {
+				if (args[0] === "add") return await addGate.promise;
+				return okResult();
+			});
+
+			let stale = false;
+			const base = createCommandContext({ cwd: "/workspace/disposed" });
+			const staleCtx = new Proxy(base.ctx, {
+				get(target, prop, receiver) {
+					if (stale) {
+						throw new Error(
+							"This extension ctx is stale after session replacement or reload.",
+						);
+					}
+					return Reflect.get(target, prop, receiver);
+				},
+			});
+
+			const inFlight = harness.handler("", staleCtx);
+			// Simulate session.dispose() invalidating ExtensionRunner without emitting session_shutdown.
+			stale = true;
+			addGate.resolve(okResult());
+			await assert.doesNotReject(inFlight);
+			assert.equal(harness.calls.length, 2);
+			assert.equal(harness.calls[1]?.options?.cwd, "/workspace/disposed");
+		});
+
+		it("session_start aborts any prior controller and unblocks /wip immediately even before the old process exits", async () => {
+			const stuckGate = createDeferred<ExecResult>();
 			const signals: AbortSignal[] = [];
 			let callIndex = 0;
 
 			const harness = setupWipExtension(async (_command, _args, options) => {
 				if (options?.signal) signals.push(options.signal);
 				callIndex += 1;
-				if (callIndex === 1) return await gate.promise;
+				if (callIndex === 1) return await stuckGate.promise;
 				return okResult();
 			});
 
@@ -573,21 +617,11 @@ describe("wipExtension", () => {
 			const firstRun = harness.handler("", first.ctx);
 			assert.equal(signals[0]?.aborted, false);
 
-			// Starting a new session aborts the in-flight run's controller.
+			// Starting a new session aborts the controller AND clears activeRun immediately.
 			harness.emit("session_start");
 			assert.equal(signals[0]?.aborted, true);
 
-			gate.resolve({
-				stdout: "",
-				stderr: "",
-				code: 143,
-				killed: true,
-				truncated: false,
-			});
-			await firstRun;
-			assert.deepEqual(first.notifications, []);
-
-			// Subsequent /wip works cleanly with a new non-aborted signal.
+			// New session /wip succeeds even while stuckGate from session 1 is still unresolved.
 			const second = createCommandContext();
 			await harness.handler("", second.ctx);
 			assert.equal(signals.length, 3);
@@ -596,6 +630,16 @@ describe("wipExtension", () => {
 			assert.deepEqual(second.notifications, [
 				{ message: 'Committed with message "wip".', level: "info" },
 			]);
+
+			stuckGate.resolve({
+				stdout: "",
+				stderr: "",
+				code: 143,
+				killed: true,
+				truncated: false,
+			});
+			await firstRun;
+			assert.deepEqual(first.notifications, []);
 		});
 
 		it("session_start re-enables /wip after session_shutdown", async () => {

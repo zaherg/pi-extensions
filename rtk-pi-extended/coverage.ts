@@ -20,6 +20,7 @@ import {
 	SHELL_PREFIX,
 	SHELL_PREFIX_FLAGS_WITH_ARG,
 	SHELL_SETUP,
+	sanitizeShell,
 } from "./policy.ts";
 
 const DEFAULT_DAYS = 30;
@@ -166,6 +167,7 @@ export async function sessionFiles(
 	scope: Scope,
 	sinceMs: number,
 ): Promise<string[]> {
+	if (!sessionDir.trim()) return [];
 	let directories = [sessionDir];
 	if (scope === "all") {
 		const root = dirname(sessionDir);
@@ -184,7 +186,11 @@ export async function sessionFiles(
 	).flat();
 	const recent: string[] = [];
 	for (const file of files) {
-		if ((await stat(file)).mtimeMs >= sinceMs) recent.push(file);
+		try {
+			if ((await stat(file)).mtimeMs >= sinceMs) recent.push(file);
+		} catch (error: unknown) {
+			if (!isMissing(error)) throw error;
+		}
 	}
 	return recent.sort();
 }
@@ -275,7 +281,7 @@ export async function scanSessions(
 	sinceMs: number,
 ): Promise<Scan> {
 	const scan: Scan = {
-		files: files.length,
+		files: 0,
 		unreadableLines: 0,
 		invalidEntries: 0,
 		tools: new Map(),
@@ -284,21 +290,26 @@ export async function scanSessions(
 	};
 	for (const file of files) {
 		const commands = new Map<string, string>();
-		const lines = createInterface({
-			input: createReadStream(file, { encoding: "utf8" }),
-			crlfDelay: Number.POSITIVE_INFINITY,
-		});
-		for await (const line of lines) {
-			if (line.trim() === "") continue;
-			let entry: unknown;
-			try {
-				entry = JSON.parse(line);
-			} catch {
-				scan.unreadableLines++;
-				continue;
+		try {
+			const lines = createInterface({
+				input: createReadStream(file, { encoding: "utf8" }),
+				crlfDelay: Number.POSITIVE_INFINITY,
+			});
+			for await (const line of lines) {
+				if (line.trim() === "") continue;
+				let entry: unknown;
+				try {
+					entry = JSON.parse(line);
+				} catch {
+					scan.unreadableLines++;
+					continue;
+				}
+				if (isRecord(entry)) scanEntry(entry, sinceMs, commands, scan);
+				else scan.unreadableLines++;
 			}
-			if (isRecord(entry)) scanEntry(entry, sinceMs, commands, scan);
-			else scan.unreadableLines++;
+			scan.files++;
+		} catch (error: unknown) {
+			if (!isMissing(error)) throw error;
 		}
 	}
 	return scan;
@@ -349,9 +360,7 @@ function segmentProgram(segment: string): string | undefined {
 
 function program(command: string): string {
 	// Join line continuations and blank quoted literals so embedded separators or secrets never surface.
-	const sanitized = command
-		.replace(/\\\r?\n/g, " ")
-		.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, "''");
+	const sanitized = sanitizeShell(command);
 	let fallback: string | undefined;
 	for (const segment of sanitized.split(/(?:&&|\|\||;|\n)+/)) {
 		const name = segmentProgram(segment);

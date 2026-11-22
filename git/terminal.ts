@@ -25,11 +25,11 @@ for tool in /usr/bin/script /usr/bin/tee /usr/bin/tail; do
     exit 127
   fi
 done
-${invocation} 2>&1 | /usr/bin/tee /dev/tty | /usr/bin/tail -c "$3"`,
+${invocation} 2>&1 | { /usr/bin/tee /dev/tty 2>/dev/null || true; } | /usr/bin/tail -c "$3"`,
 		"pi-git",
 		shell,
 		command,
-		String(CAPTURE_BYTES),
+		String(CAPTURE_BYTES + 1),
 	];
 }
 
@@ -47,5 +47,8 @@ export function gitResultMessage(
 		status === 0 && !signal
 			? "(No output)"
 			: "No diagnostic text was captured; check the terminal output.";
-	return `${heading}\n${displayTail(output?.toString("utf8") ?? "", (output?.length ?? 0) >= CAPTURE_BYTES, empty)}`;
+	const cut = (output?.length ?? 0) > CAPTURE_BYTES;
+	const sliced =
+		cut && output ? output.subarray(output.length - CAPTURE_BYTES) : output;
+	return `${heading}\n${displayTail(sliced?.toString("utf8") ?? "", cut, empty)}`;
 }

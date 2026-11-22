@@ -24,10 +24,7 @@ function makeParagraph(tag: string, minBytes = MIN_PASSAGE_BYTES): string {
 	return `${prefix}${"x".repeat(fillLen)}`;
 }
 
-function makeNumberedHunk(
-	start: number,
-	lines: readonly string[],
-): string {
+function makeNumberedHunk(start: number, lines: readonly string[]): string {
 	return lines
 		.map((line: string, index: number) => `${start + index}\t${line}`)
 		.join("\n");
@@ -49,7 +46,14 @@ describe("ReadIndex", () => {
 		// Partial overlap (new view starts in the middle and extends past end)
 		const partial = index.overlaps(
 			"/repo/a.ts",
-			makeView(6, ["line-6", "line-7", "line-8", "line-9", "line-10", "line-11"]),
+			makeView(6, [
+				"line-6",
+				"line-7",
+				"line-8",
+				"line-9",
+				"line-10",
+				"line-11",
+			]),
 		);
 		assert.equal(partial.length, 1);
 		assert.equal(partial[0]?.from, 6);
@@ -63,7 +67,10 @@ describe("ReadIndex", () => {
 
 		// Mismatched content in overlap region
 		assert.deepEqual(
-			index.overlaps("/repo/a.ts", makeView(5, ["line-5", "MODIFIED", "line-7"])),
+			index.overlaps(
+				"/repo/a.ts",
+				makeView(5, ["line-5", "MODIFIED", "line-7"]),
+			),
 			[],
 		);
 
@@ -164,6 +171,30 @@ describe("ReadIndex", () => {
 				.overlaps("/repo/big.ts", makeView(1, [chunk]))
 				.map((o) => o.source.toolCallId),
 			["c3", "c2"],
+		);
+	});
+
+	it("evicts conflicting earlier sources on A -> B -> A revert and truncates past-EOF sources", () => {
+		const index = new ReadIndex();
+		const path = "/repo/revert.ts";
+		const v1 = makeView(1, ["a1", "a2", "a3", "a4", "a5"]);
+		const v2 = makeView(1, ["a1", "CHANGED", "a3", "a4", "a5"]);
+
+		index.record(path, "call-v1", v1);
+		index.record(path, "call-v2", v2);
+		// Reverting to v1 (e.g. via git checkout in bash) must NOT match stale call-v1!
+		assert.deepEqual(index.overlaps(path, v1), []);
+
+		const shrinkPath = "/repo/shrink.ts";
+		const lines = Array.from({ length: 10 }, (_, i) => `s-${i + 1}`);
+		index.record(shrinkPath, "call-4", makeView(1, lines.slice(0, 4)));
+		index.record(shrinkPath, "call-10", makeView(1, lines));
+		index.truncate(shrinkPath, 5);
+		assert.deepEqual(
+			index
+				.overlaps(shrinkPath, makeView(1, lines.slice(0, 5)))
+				.map((o) => o.source.toolCallId),
+			["call-4"],
 		);
 	});
 });
@@ -312,7 +343,9 @@ describe("passages / PassageIndex / dedupPassages", () => {
 		assert.ok(parts[1]?.endsWith("\n```"));
 		assert.ok(parts[2]?.startsWith("~~~py\n[rtk-pi-extended: 1 passage(s),"));
 		assert.ok(parts[2]?.endsWith("\n~~~"));
-		assert.ok(parts[3]?.startsWith("   ```sh\n[rtk-pi-extended: 1 passage(s),"));
+		assert.ok(
+			parts[3]?.startsWith("   ```sh\n[rtk-pi-extended: 1 passage(s),"),
+		);
 		assert.ok(parts[3]?.endsWith("\n   ```"));
 		assert.ok(parts[4]?.startsWith("````md\n[rtk-pi-extended: 1 passage(s),"));
 		assert.ok(parts[4]?.endsWith("\n````"));

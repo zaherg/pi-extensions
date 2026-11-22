@@ -245,6 +245,20 @@ process.stdout.write(JSON.stringify({
 		assert.deepEqual(res, { ok: false, reason: "process" });
 	});
 
+	it("succeeds when child exits 0 early without draining >64 KiB stdin pipe", async () => {
+		const dir = await makeTempDir("rtk-invoke-epipe-");
+		const bin = await createFakeRtk(
+			dir,
+			`process.stdout.write(""); process.exit(0);`,
+		);
+		const largeInput = "x".repeat(256 * 1024);
+		const res = await invokeRtk(["hook", "claude"], largeInput, {
+			configDirectory: dir,
+			executable: bin,
+		});
+		assert.deepEqual(res, { ok: true, stdout: "" });
+	});
+
 	it("returns timeout when subprocess exceeds timeoutMs", async () => {
 		const dir = await makeTempDir("rtk-invoke-timeout-");
 		const bin = await createFakeRtk(
@@ -257,6 +271,45 @@ process.stdout.write(JSON.stringify({
 			timeoutMs: 80,
 		});
 		assert.deepEqual(res, { ok: false, reason: "timeout" });
+	});
+
+	it("returns timeout promptly even when a detached grandchild inherits stdout/stderr pipes", async () => {
+		const dir = await makeTempDir("rtk-invoke-grandchild-");
+		const pidFile = join(dir, "grandchild.pid");
+		const bin = await createFakeRtk(
+			dir,
+			`
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const grand = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10_000)"], {
+	detached: true,
+	stdio: "inherit",
+});
+if (grand.pid) writeFileSync(${JSON.stringify(pidFile)}, String(grand.pid), "utf8");
+grand.unref();
+setTimeout(() => {}, 10_000);
+`,
+		);
+		const start = performance.now();
+		try {
+			const res = await invokeRtk(["hook", "claude"], "hi", {
+				configDirectory: dir,
+				executable: bin,
+				timeoutMs: 120,
+			});
+			const elapsed = performance.now() - start;
+			assert.deepEqual(res, { ok: false, reason: "timeout" });
+			assert.ok(elapsed < 2_500, `expected prompt timeout, took ${elapsed}ms`);
+		} finally {
+			const pid = Number(await readFile(pidFile, "utf8").catch(() => "0"));
+			if (pid > 0) {
+				try {
+					process.kill(pid, "SIGKILL");
+				} catch {
+					// Already exited.
+				}
+			}
+		}
 	});
 
 	it("returns aborted when signal is already aborted or aborts mid-flight", async () => {
@@ -911,7 +964,10 @@ describe("outcomes.ts — Ledger, mergeTallies & parseEntry", () => {
 			bytesBefore: 2000,
 			bytesAfter: 2000,
 		});
-		assert.equal(byKey.get("bash|terminal|rtk:terminal|failed|process")?.count, 1);
+		assert.equal(
+			byKey.get("bash|terminal|rtk:terminal|failed|process")?.count,
+			1,
+		);
 		assert.equal(
 			byKey.get("grep|listing|rtk:listing+grep-group|filtered|")?.count,
 			1,
@@ -1090,7 +1146,7 @@ describe("coverage.ts — parseCoverageArgs", () => {
 });
 
 describe("coverage.ts — sessionFiles & scanSessions", () => {
-	it("discovers recent session jsonl files respecting scope, mtime, depth, ignored dirs, and symlinks", async () => {
+	it("discovers recent session jsonl files respecting scope, mtime, depth, ignored dirs, symlinks, and empty sessionDir", async () => {
 		const root = await makeTempDir("rtk-sessions-");
 		const projA = join(root, "proj-a");
 		const projB = join(root, "proj-b");
@@ -1134,17 +1190,20 @@ describe("coverage.ts — sessionFiles & scanSessions", () => {
 		const allProjects = await sessionFiles(projA, "all", sinceMs);
 		assert.deepEqual(allProjects, [recentA, depth4File, recentB].sort());
 
-		// Missing directory returns empty list rather than throwing
+		// Missing or empty (--no-session) directory returns empty list rather than scanning cwd
 		assert.deepEqual(
 			await sessionFiles(join(root, "nonexistent"), "project", sinceMs),
 			[],
 		);
+		assert.deepEqual(await sessionFiles("", "all", sinceMs), []);
+		assert.deepEqual(await sessionFiles("   ", "project", sinceMs), []);
 	});
 
-	it("scans JSONL sessions for tool bytes, bash command pairing, outcomes, windowing, and malformed lines", async () => {
+	it("scans JSONL sessions for tool bytes, bash command pairing, outcomes, windowing, malformed lines, and vanished files", async () => {
 		const dir = await makeTempDir("rtk-scan-");
 		const file1 = join(dir, "s1.jsonl");
 		const file2 = join(dir, "s2.jsonl");
+		const vanished = join(dir, "vanished.jsonl");
 		const now = 1_700_000_000_000;
 		const since = now - 86_400_000;
 		const oldTime = since - 10_000;
@@ -1331,7 +1390,7 @@ describe("coverage.ts — sessionFiles & scanSessions", () => {
 		await writeFile(file1, `${file1Lines.join("\n")}\n`, "utf8");
 		await writeFile(file2, `${file2Lines.join("\n")}\n`, "utf8");
 
-		const scan = await scanSessions([file1, file2], since);
+		const scan = await scanSessions([file1, vanished, file2], since);
 		assert.equal(scan.files, 2);
 		assert.equal(scan.unreadableLines, 2);
 		assert.equal(scan.invalidEntries, 2);
@@ -1394,13 +1453,14 @@ describe("coverage.ts — classifyBash", () => {
 		});
 	});
 
-	it("extracts leading program across SHELL_SETUP, SHELL_PREFIX, SHELL_PREFIX_FLAGS_WITH_ARG, quotes, and continuations", async () => {
+	it("extracts leading program across SHELL_SETUP, SHELL_PREFIX, SHELL_PREFIX_FLAGS_WITH_ARG, quotes, comments, and continuations", async () => {
 		const cases: Array<[string, string]> = [
 			["env -u FOO -C /tmp --unset BAR /usr/bin/python3 app.py", "python3"],
 			["env -- -weird-bin", "-weird-bin"],
 			["nice -n 10 --adjustment 5 /usr/local/bin/rg needle", "rg"],
 			["exec -a myproc node server.js", "node"],
 			["cd /app && export API_KEY='secret; rm -rf' && FOO=1 curl url", "curl"],
+			["# author's comment\nbun run test", "bun"],
 			["time \\\n  nohup make build", "make"],
 			["cd /only-setup", "cd"],
 			["FOO=1 BAR=2", "?"],
@@ -1441,7 +1501,10 @@ describe("coverage.ts — classifyBash", () => {
 			maxActive <= 8,
 			`expected concurrency <= 8, observed ${maxActive}`,
 		);
-		assert.ok(maxActive > 1, `expected parallel workers, observed ${maxActive}`);
+		assert.ok(
+			maxActive > 1,
+			`expected parallel workers, observed ${maxActive}`,
+		);
 		assert.equal(coverage.rewritten.results, 24);
 	});
 

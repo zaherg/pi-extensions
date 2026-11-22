@@ -48,11 +48,12 @@ function inferStatus(
 	)
 		return "aborted";
 	if (state === "blocked") return "blocked";
-	if (typeof raw.exitCode === "number")
-		return raw.exitCode === 0 ? "completed" : "failed";
 	if (stop === "error" || state === "failed" || state === "error")
 		return "failed";
+	if (typeof raw.exitCode === "number")
+		return raw.exitCode === 0 ? "completed" : "failed";
 	if (
+		stop === "stop" ||
 		state === "completed" ||
 		state === "complete" ||
 		state === "succeeded" ||
@@ -160,6 +161,10 @@ export function workerRows(
 						return { priority: 1, text: `${slot} Unsupported worker report.` };
 					if (statusKey === "failed" || statusKey === "aborted")
 						reportedFailure = true;
+					const blocker =
+						statusKey === "blocked" && typeof c.blocker === "string"
+							? displayLabel(c.blocker, 64)
+							: "";
 					const taskLabel =
 						typeof c.sessionName === "string"
 							? displayLabel(c.sessionName, 64)
@@ -177,6 +182,7 @@ export function workerRows(
 						priority: priority[statusKey],
 						text: [
 							`${status} ${agent} ${slot}`,
+							blocker && `blocked by: ${blocker}`,
 							taskLabel,
 							last && `last: ${last}`,
 						]
@@ -197,6 +203,22 @@ export function workerRows(
 								? `Workflow failed (${failureKind}).`
 								: "Workflow failed.",
 							0,
+						),
+					);
+				} else if (
+					(wfStateRaw === "aborted" ||
+						wfStateRaw === "stopped" ||
+						wfStateRaw === "cancelled" ||
+						wfStateRaw === "canceled" ||
+						stopCause) &&
+					!reportedFailure
+				) {
+					childRows.unshift(
+						note(
+							stopCause
+								? `Workflow stopped (${stopCause}).`
+								: "Workflow aborted.",
+							1,
 						),
 					);
 				}

@@ -42,12 +42,32 @@ function overlap(source: ReadSource, view: ReadView): Overlap | undefined {
 	return { source, from, to };
 }
 
+function conflictsWith(source: ReadSource, view: ReadView): boolean {
+	const from = Math.max(source.start, view.start);
+	const to =
+		Math.min(
+			source.start + source.lines.length,
+			view.start + view.lines.length,
+		) - 1;
+	return to >= from && overlap(source, view) === undefined;
+}
+
 /** Verbatim read results delivered in the current session. */
 export class ReadIndex {
 	readonly #sources: ReadSource[] = [];
 	/** Start lines per path whose last delivery was a stub or condensed view. */
 	readonly #replaced = new Map<string, Set<number>>();
 	#chars = 0;
+
+	/** Evict earlier reads of path whose overlapping lines changed outside edit/write. */
+	evictConflicts(path: string, view: ReadView): void {
+		for (let index = this.#sources.length - 1; index >= 0; index--) {
+			const source = this.#sources[index];
+			if (source?.path !== path || !conflictsWith(source, view)) continue;
+			this.#chars -= source.body.length;
+			this.#sources.splice(index, 1);
+		}
+	}
 
 	/** Record a verbatim read and clear any forced re-read marker for its range. */
 	record(
@@ -56,6 +76,7 @@ export class ReadIndex {
 		view: ReadView,
 		requestedStart?: number,
 	): void {
+		this.evictConflicts(path, view);
 		const replaced = this.#replaced.get(path);
 		if (replaced) {
 			const end = view.start + view.lines.length - 1;
@@ -77,6 +98,20 @@ export class ReadIndex {
 		this.#chars += view.body.length;
 		while (this.#chars > MAX_INDEXED_CHARS && this.#sources.length > 0) {
 			this.#chars -= this.#sources.shift()?.body.length ?? 0;
+		}
+	}
+
+	/** Evict earlier reads extending past eofLine when a read reached end-of-file. */
+	truncate(path: string, eofLine: number): void {
+		for (let index = this.#sources.length - 1; index >= 0; index--) {
+			const source = this.#sources[index];
+			if (
+				source?.path !== path ||
+				source.start + source.lines.length - 1 <= eofLine
+			)
+				continue;
+			this.#chars -= source.body.length;
+			this.#sources.splice(index, 1);
 		}
 	}
 

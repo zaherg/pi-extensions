@@ -288,9 +288,7 @@ describe("progress/cli and progress/index", () => {
 
 	beforeEach(async () => {
 		originalHome = process.env.HOME;
-		rootTmp = await realpath(
-			await mkdtemp(join(tmpdir(), "pi-progress-ext-")),
-		);
+		rootTmp = await realpath(await mkdtemp(join(tmpdir(), "pi-progress-ext-")));
 		homeDir = join(rootTmp, "home");
 		projectDir = join(rootTmp, "work", "cli-project");
 		await mkdir(homeDir, { recursive: true });
@@ -498,7 +496,7 @@ describe("progress/cli and progress/index", () => {
 	});
 
 	describe("progress/index.ts tool registration and execution", () => {
-		test("registers progress tool, executes read/mutations, blocks start, formats errors, and truncates >50 KiB output", async () => {
+		test("registers progress tool, executes read/mutations, redacts secrets, blocks start, formats errors, and truncates >50 KiB output", async () => {
 			const ext = createExtensionHarness();
 			const mock = createMockContext(projectDir);
 			const tool = ext.getTool();
@@ -549,16 +547,17 @@ describe("progress/cli and progress/index", () => {
 				/NOT_STARTED:/,
 			);
 
-			// Enable tracking via store, then run full tool mutations
+			// Enable tracking via store, then run full tool mutations (including secret redaction)
 			await runProgress(projectDir, { action: "start" });
 			const added = (await tool.execute(
 				"call-4",
 				{
 					action: "add_task",
 					expected_revision: 0,
-					title: "Tool task",
-					description: "Created through extension tool",
-					steps: ["Step 1"],
+					title: "Tool task api_key\u200b=sk-1234567890abcdef1234",
+					description:
+						"Created with Authorization: \x1b[32mBearer\x1b[0m supersecret_tool_val",
+					steps: ["Step 1 with token\x1b[0m=stepsecret123"],
 				},
 				undefined,
 				undefined,
@@ -568,6 +567,11 @@ describe("progress/cli and progress/index", () => {
 			const task = added.details.document?.tasks[0];
 			const step = task?.steps[0];
 			assert.ok(task && step);
+			assert.equal(task.title.includes("sk-1234567890abcdef1234"), false);
+			assert.equal(task.title.includes("\u200b"), false);
+			assert.equal(task.description.includes("supersecret_tool_val"), false);
+			assert.equal(task.description.includes("\x1b"), false);
+			assert.equal(step.description.includes("stepsecret123"), false);
 
 			const updated = (await tool.execute(
 				"call-5",
@@ -631,7 +635,7 @@ describe("progress/cli and progress/index", () => {
 	});
 
 	describe("progress/index.ts /progress command", () => {
-		test("handles status read, start (idempotent), invalid subcommands, and store errors", async () => {
+		test("handles status read, start (idempotent), invalid subcommands, store errors, and stale/non-UI contexts", async () => {
 			const ext = createExtensionHarness();
 			const mock = createMockContext(projectDir);
 			const cmd = ext.getCommand();
@@ -715,6 +719,39 @@ describe("progress/cli and progress/index", () => {
 				mock.notifications[beforeErr]?.message ?? "",
 				/INVALID_DOCUMENT:/,
 			);
+
+			// Stale context after initial cwd read falls back cleanly without throwing
+			let stale = false;
+			const staleCmdCtx = new Proxy(mock.cmdCtx, {
+				get(target, prop, receiver) {
+					if (prop === "cwd" && !stale) {
+						stale = true;
+						return Reflect.get(target, prop, receiver);
+					}
+					if (stale) {
+						throw new Error(
+							"This extension ctx is stale after session replacement or reload.",
+						);
+					}
+					return Reflect.get(target, prop, receiver);
+				},
+			});
+			const origWrite = process.stderr.write.bind(process.stderr);
+			const stderrChunks: string[] = [];
+			process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+				stderrChunks.push(String(chunk));
+				return true;
+			}) as typeof process.stderr.write;
+			try {
+				await assert.doesNotReject(
+					Promise.resolve(cmd.handler("", staleCmdCtx)),
+				);
+				assert.ok(
+					stderrChunks.some((line) => line.includes("INVALID_DOCUMENT:")),
+				);
+			} finally {
+				process.stderr.write = origWrite;
+			}
 		});
 	});
 
@@ -722,7 +759,9 @@ describe("progress/cli and progress/index", () => {
 		test("before_agent_start returns undefined when untracked, injects hidden context when tracked, invalidates in-flight update, and warns on corrupt file", async () => {
 			const ext = createExtensionHarness();
 			const mock = createMockContext(projectDir);
-			const startEvent = { type: "before_agent_start" } as BeforeAgentStartEvent;
+			const startEvent = {
+				type: "before_agent_start",
+			} as BeforeAgentStartEvent;
 
 			// Untracked -> undefined and no directories created
 			const untracked = (await ext.emit(

@@ -130,6 +130,43 @@ describe("groupGrep / ungroupGrep", () => {
 	it("returns undefined for plain text with no grep lines", () => {
 		assert.equal(groupGrep("just some plain text\nsecond line"), undefined);
 	});
+
+	it("protects fenced code blocks from false-positive grep grouping and rejects unclosed fences", () => {
+		const fencedOnly = [
+			"```yaml",
+			"redis:7:alpine",
+			"postgres:16:bookworm",
+			"```",
+		].join("\n");
+		assert.equal(groupGrep(fencedOnly), undefined);
+
+		const mixed = [
+			"src/a.ts:1:const alpha = 1;",
+			"src/a.ts:2:const beta = 2;",
+			"```yaml",
+			"redis:7:alpine",
+			"postgres:16:bookworm",
+			"```",
+			"src/b.ts:10:const gamma = 3;",
+			"src/b.ts:11:const delta = 4;",
+		].join("\n");
+		const grouped = groupGrep(mixed);
+		assert.notEqual(grouped, undefined);
+		assert.ok(
+			(grouped ?? "").includes(
+				"```yaml\nredis:7:alpine\npostgres:16:bookworm\n```",
+			),
+		);
+		assert.equal(ungroupGrep(grouped ?? ""), mixed);
+
+		const unclosed = [
+			"src/a.ts:1:const alpha = 1;",
+			"src/a.ts:2:const beta = 2;",
+			"```yaml",
+			"redis:7:alpine",
+		].join("\n");
+		assert.equal(groupGrep(unclosed), undefined);
+	});
 });
 
 describe("stepFenceLine (CommonMark §4.5)", () => {
@@ -230,10 +267,8 @@ describe("factorSuffixes / unfactorSuffixes", () => {
 		" --config /workspace/project/configs/production.json --verbose";
 	const suffixB =
 		" -> https://registry.example.invalid/packages/v2/metadata.json";
-	const suffixC =
-		" [status=200 duration_ms=142 region=us-east-1 cache=HIT]";
-	const suffixD =
-		" (retry_attempt=0 backoff=exponential max_attempts=5 ok)";
+	const suffixC = " [status=200 duration_ms=142 region=us-east-1 cache=HIT]";
+	const suffixD = " (retry_attempt=0 backoff=exponential max_attempts=5 ok)";
 
 	it("factors repeated long suffixes and roundtrips exactly", () => {
 		const input = [
@@ -380,10 +415,7 @@ describe("compactJsonDocument", () => {
 	it("strips leading indentation from valid pretty-printed JSON objects and arrays", () => {
 		const obj = JSON.stringify({ a: 1, nested: { b: [2, 3] } }, null, 2);
 		const compactObj = compactJsonDocument(obj);
-		assert.equal(
-			compactObj,
-			'{\n"a": 1,\n"nested": {\n"b": [\n2,\n3\n]\n}\n}',
-		);
+		assert.equal(compactObj, '{\n"a": 1,\n"nested": {\n"b": [\n2,\n3\n]\n}\n}');
 		assert.deepEqual(JSON.parse(compactObj ?? ""), JSON.parse(obj));
 
 		const arr = JSON.stringify([{ id: 1 }, { id: 2 }], null, "\t");

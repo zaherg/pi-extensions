@@ -27,7 +27,11 @@ type SelectHandler = (
 
 function makeAssistantEntry(
 	id: string,
-	toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>,
+	toolCalls: Array<{
+		id: string;
+		name: string;
+		arguments: Record<string, unknown>;
+	}>,
 ): SessionEntry {
 	return {
 		type: "message",
@@ -68,7 +72,8 @@ function makeToolResultMessage(opts: {
 	isError?: boolean;
 }): ToolResultMessage {
 	const content: ToolResultMessage["content"] =
-		opts.content ?? (opts.text !== undefined ? [{ type: "text", text: opts.text }] : []);
+		opts.content ??
+		(opts.text !== undefined ? [{ type: "text", text: opts.text }] : []);
 	return {
 		role: "toolResult",
 		toolCallId: opts.toolCallId,
@@ -135,7 +140,9 @@ function createTraceHarness(initialBranch: SessionEntry[] = []) {
 		},
 		registerCommand(
 			name: string,
-			config: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> },
+			config: {
+				handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+			},
 		): void {
 			if (name === "trace") commandHandler = config.handler;
 		},
@@ -164,7 +171,11 @@ function createTraceHarness(initialBranch: SessionEntry[] = []) {
 					options: string[],
 					opts?: { signal?: AbortSignal },
 				): Promise<string | undefined> {
-					selectCalls.push({ title, options: [...options], signal: opts?.signal });
+					selectCalls.push({
+						title,
+						options: [...options],
+						signal: opts?.signal,
+					});
 					return selectHandler(title, options, opts);
 				},
 			},
@@ -204,7 +215,10 @@ describe("trace: callPreview", () => {
 		assert.equal(callPreview({ file_path: "README.md" }), "README.md");
 		assert.equal(callPreview({ pattern: "*.test.ts" }), "*.test.ts");
 		assert.equal(callPreview({ query: "extension api" }), "extension api");
-		assert.equal(callPreview({ url: "https://example.com/docs" }), "https://example.com/docs");
+		assert.equal(
+			callPreview({ url: "https://example.com/docs" }),
+			"https://example.com/docs",
+		);
 		assert.equal(callPreview({ action: "restart" }), "restart");
 		assert.equal(callPreview({ agent: "reviewer" }), "reviewer");
 		assert.equal(callPreview({ workflow: "release" }), "release");
@@ -299,7 +313,7 @@ describe("trace: codemodeCalls", () => {
 		);
 	});
 
-	it("parses valid entries and skips malformed entries", () => {
+	it("parses valid entries, sanitizes string args/errors directly, and skips malformed entries", () => {
 		const msg = makeToolResultMessage({
 			toolCallId: "c1",
 			toolName: "codemode",
@@ -326,6 +340,12 @@ describe("trace: codemodeCalls", () => {
 						name: "edit",
 						status: "very-long-custom-status-value",
 					},
+					{
+						name: "curl",
+						args: "\x1b[31mBearer sk-live_1234567890abcdef123456\x1b[0m",
+						status: "error",
+						error: "\x1b[33mapi_key=ghp_1234567890abcdefghij123456\x1b[0m",
+					},
 				],
 			},
 		});
@@ -334,6 +354,12 @@ describe("trace: codemodeCalls", () => {
 			{ name: "read", args: "src/index.ts", status: "error", error: "ENOENT" },
 			{ name: "grep", args: "", status: "unknown", error: "" },
 			{ name: "edit", args: "", status: "very-long-custo…", error: "" },
+			{
+				name: "curl",
+				args: "Bearer [REDACTED]",
+				status: "error",
+				error: "api_key=[REDACTED]",
+			},
 		]);
 	});
 });
@@ -441,7 +467,12 @@ describe("trace: /trace command happy paths", () => {
 			);
 		}
 		const h = createTraceHarness(entries);
-		const picks = ["Older results →", "Older results →", "← Newer results", undefined];
+		const picks = [
+			"Older results →",
+			"Older results →",
+			"← Newer results",
+			undefined,
+		];
 		let idx = 0;
 		h.setSelect(async () => picks[idx++]);
 
@@ -496,10 +527,9 @@ describe("trace: /trace command happy paths", () => {
 describe("trace: validation, empty state, and codemode badges", () => {
 	it("throws when !ctx.hasUI", async () => {
 		const h = createTraceHarness([]);
-		await assert.rejects(
-			() => h.run("", false),
-			{ message: "/trace requires an interactive Pi or RPC UI." },
-		);
+		await assert.rejects(() => h.run("", false), {
+			message: "/trace requires an interactive Pi or RPC UI.",
+		});
 	});
 
 	it("warns on invalid argument count or order", async () => {
@@ -517,7 +547,12 @@ describe("trace: validation, empty state, and codemode badges", () => {
 
 	it("notifies when branch is empty or filter matches nothing", async () => {
 		const h = createTraceHarness([
-			makeToolResultEntry({ id: "r1", toolCallId: "t1", toolName: "read", text: "ok" }),
+			makeToolResultEntry({
+				id: "r1",
+				toolCallId: "t1",
+				toolName: "read",
+				text: "ok",
+			}),
 		]);
 		await h.run("failed");
 		await h.run("bash");
@@ -536,8 +571,16 @@ describe("trace: validation, empty state, and codemode badges", () => {
 	it("renders per-tool codemode status badges (ok vs nested-err, [bash], [bash 1/2 err], [1/2 err]) and outer isError vs caught inner error", async () => {
 		const branch: SessionEntry[] = [
 			makeAssistantEntry("a1", [
-				{ id: "cm1", name: "codemode", arguments: { code: "// @options: {}\nawait run();" } },
-				{ id: "cm2", name: "codemode", arguments: { code: "throw new Error('outer');" } },
+				{
+					id: "cm1",
+					name: "codemode",
+					arguments: { code: "// @options: {}\nawait run();" },
+				},
+				{
+					id: "cm2",
+					name: "codemode",
+					arguments: { code: "throw new Error('outer');" },
+				},
 			]),
 			// Caught inner error: outer isError=false, bash has 1/2 err, read has 0/1 err
 			makeToolResultEntry({
@@ -570,9 +613,15 @@ describe("trace: validation, empty state, and codemode badges", () => {
 		const h = createTraceHarness(branch);
 
 		// Unfiltered /trace
-		h.setSelect(async (_t, opts) => (h.notifications.length === 0 ? opts[1] : undefined));
+		h.setSelect(async (_t, opts) =>
+			h.notifications.length === 0 ? opts[1] : undefined,
+		);
 		await h.run("");
-		assert.ok(h.selectCalls[0]?.options[0]?.startsWith("1. failed codemode (throw new Error('outer');)"));
+		assert.ok(
+			h.selectCalls[0]?.options[0]?.startsWith(
+				"1. failed codemode (throw new Error('outer');)",
+			),
+		);
 		assert.ok(
 			h.selectCalls[0]?.options[1]?.startsWith(
 				"2. nested-err codemode ([1/3 err] await run();)",
@@ -581,7 +630,9 @@ describe("trace: validation, empty state, and codemode badges", () => {
 		assert.equal(h.notifications[0]?.level, "warning");
 		assert.ok(h.notifications[0]?.message.includes("[Nested calls]"));
 		assert.ok(h.notifications[0]?.message.includes("- ok read (a.ts)"));
-		assert.ok(h.notifications[0]?.message.includes("- error bash (false): exit 1"));
+		assert.ok(
+			h.notifications[0]?.message.includes("- error bash (false): exit 1"),
+		);
 
 		// Per-tool /trace bash -> [bash 1/2 err], nested-err, warning
 		h.selectCalls.length = 0;
@@ -647,6 +698,7 @@ describe("trace: validation, empty state, and codemode badges", () => {
 
 		// /trace failed bash -> only r-cm1 matches
 		h.selectCalls.length = 0;
+		h.notifications.length = 0;
 		await h.run("failed bash");
 		assert.equal(h.selectCalls[0]?.options.length, 1);
 		assert.ok(h.selectCalls[0]?.options[0]?.includes("#r-cm1"));
@@ -719,14 +771,15 @@ describe("trace: selectNestedCalls prioritization and diagnostics", () => {
 		assert.ok(msg.includes("- #14 ok read (f14.ts)"));
 	});
 
-	it("prioritizes <tool> match in head even when ok if tail has no <tool> calls", async () => {
+	it("prioritizes <tool> match in head even when ok (both when tail has none and when tail also has <tool>)", async () => {
 		const calls = [
 			{ name: "bash", args: "early-cmd", status: "ok" },
-			...Array.from({ length: 12 }, (_, i) => ({
+			...Array.from({ length: 11 }, (_, i) => ({
 				name: "read",
 				args: `f${i + 2}.ts`,
 				status: "ok",
 			})),
+			{ name: "bash", args: "late-cmd", status: "ok" },
 		];
 		const h = createTraceHarness([
 			makeToolResultEntry({
@@ -749,6 +802,7 @@ describe("trace: selectNestedCalls prioritization and diagnostics", () => {
 		const msg = h.notifications[0]?.message ?? "";
 		assert.ok(msg.includes("(Showing 10 of 13; errors/matches prioritized)"));
 		assert.ok(msg.includes("- #1 ok bash (early-cmd)"));
+		assert.ok(msg.includes("- #13 ok bash (late-cmd)"));
 	});
 
 	it("prioritizes <tool> failed -> <tool> ok -> unrelated failed -> recent in ascending #index order", async () => {
@@ -854,7 +908,9 @@ describe("trace: selectNestedCalls prioritization and diagnostics", () => {
 
 		// r-img (newest, index 0)
 		assert.ok(
-			h.notifications[0]?.message.endsWith("(No displayable text in the retained output.)"),
+			h.notifications[0]?.message.endsWith(
+				"(No displayable text in the retained output.)",
+			),
 		);
 
 		// r-exact (index 1): exact 16 KiB block keeps its lines intact and marks [Last output only]
@@ -879,7 +935,9 @@ describe("trace: selectNestedCalls prioritization and diagnostics", () => {
 				{
 					id: "cm-sec",
 					name: "codemode",
-					arguments: { code: `fetch("https://u:p@host", { token: "${secretKey}" })` },
+					arguments: {
+						code: `fetch("https://u:p@host", { token: "${secretKey}" })`,
+					},
 				},
 			]),
 			makeToolResultEntry({
@@ -921,10 +979,19 @@ describe("trace: selectNestedCalls prioritization and diagnostics", () => {
 });
 
 describe("trace: abort lifecycle and stale branch detection", () => {
-	for (const event of ["session_tree", "session_start", "session_shutdown"] as const) {
+	for (const event of [
+		"session_tree",
+		"session_start",
+		"session_shutdown",
+	] as const) {
 		it(`aborts active picker signal on ${event}`, async () => {
 			const h = createTraceHarness([
-				makeToolResultEntry({ id: "r1", toolCallId: "t1", toolName: "bash", text: "ok" }),
+				makeToolResultEntry({
+					id: "r1",
+					toolCallId: "t1",
+					toolName: "bash",
+					text: "ok",
+				}),
 			]);
 			let capturedSignal: AbortSignal | undefined;
 			let resolveSelect: ((value: string | undefined) => void) | undefined;
@@ -949,7 +1016,12 @@ describe("trace: abort lifecycle and stale branch detection", () => {
 
 	it("aborts an earlier overlapping /trace picker when a second /trace opens", async () => {
 		const h = createTraceHarness([
-			makeToolResultEntry({ id: "r1", toolCallId: "t1", toolName: "bash", text: "ok" }),
+			makeToolResultEntry({
+				id: "r1",
+				toolCallId: "t1",
+				toolName: "bash",
+				text: "ok",
+			}),
 		]);
 		const resolvers: Array<(v: string | undefined) => void> = [];
 		const signals: Array<AbortSignal | undefined> = [];
@@ -973,9 +1045,14 @@ describe("trace: abort lifecycle and stale branch detection", () => {
 		assert.equal(h.notifications.length, 0);
 	});
 
-	it("notifies and exits when the selected entry is no longer on the branch", async () => {
+	it("notifies and exits when the selected entry is no longer on the branch, and swallows UI disconnect errors", async () => {
 		const h = createTraceHarness([
-			makeToolResultEntry({ id: "r1", toolCallId: "t1", toolName: "bash", text: "ok" }),
+			makeToolResultEntry({
+				id: "r1",
+				toolCallId: "t1",
+				toolName: "bash",
+				text: "ok",
+			}),
 		]);
 		h.setSelect(async (_t, opts) => {
 			h.setBranch([]);
@@ -989,5 +1066,19 @@ describe("trace: abort lifecycle and stale branch detection", () => {
 				level: "warning",
 			},
 		]);
+
+		// Rejecting select (e.g., RPC UI closed mid-picker) exits cleanly without throwing
+		h.setBranch([
+			makeToolResultEntry({
+				id: "r2",
+				toolCallId: "t2",
+				toolName: "bash",
+				text: "ok",
+			}),
+		]);
+		h.setSelect(async () => {
+			throw new Error("RPC client disconnected");
+		});
+		await assert.doesNotReject(() => h.run(""));
 	});
 });

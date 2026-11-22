@@ -40,6 +40,7 @@ interface TraceItem {
 	time: string;
 	msg: ToolResultMessage;
 	preview: string;
+	nested: NestedCall[];
 	hasFailedNestedCall: boolean;
 }
 
@@ -81,12 +82,15 @@ export function codemodeCalls(msg: ToolResultMessage): NestedCall[] {
 		if (!isRecord(raw) || typeof raw.name !== "string" || !raw.name) continue;
 		out.push({
 			name: raw.name,
-			args: typeof raw.args === "string" ? raw.args : callPreview(raw.args),
+			args:
+				typeof raw.args === "string"
+					? displayLabel(raw.args, 40)
+					: callPreview(raw.args),
 			status:
 				typeof raw.status === "string"
 					? displayLabel(raw.status, 16) || "unknown"
 					: "unknown",
-			error: typeof raw.error === "string" ? raw.error : "",
+			error: typeof raw.error === "string" ? displayLabel(raw.error, 120) : "",
 		});
 	}
 	return out;
@@ -113,10 +117,11 @@ function selectNestedCalls(
 	const tail = nested.slice(tailStart);
 	const tailCovers = filterTool
 		? !head.some(
+				(c: NestedCall): boolean => c.name === filterTool || isFailedCall(c),
+			) ||
+			tail.filter(
 				(c: NestedCall): boolean => c.name === filterTool && isFailedCall(c),
-			) &&
-			(!nested.some((c: NestedCall): boolean => c.name === filterTool) ||
-				tail.some((c: NestedCall): boolean => c.name === filterTool))
+			).length === MAX_NESTED
 		: !head.some(isFailedCall);
 	if (tailCovers) {
 		return {
@@ -152,7 +157,11 @@ function selectNestedCalls(
 	return { shown, prioritized: true };
 }
 
-function diagnostic(msg: ToolResultMessage, tool?: string): string {
+function diagnostic(
+	msg: ToolResultMessage,
+	tool?: string,
+	cachedNested?: readonly NestedCall[],
+): string {
 	// Keep only a bounded text tail without loading referenced files or rendering images.
 	const { content } = msg;
 	let text = "";
@@ -185,7 +194,7 @@ function diagnostic(msg: ToolResultMessage, tool?: string): string {
 		cut,
 		"(No displayable text in the retained output.)",
 	);
-	const nested = codemodeCalls(msg);
+	const nested = cachedNested ?? codemodeCalls(msg);
 	if (!nested.length) return tail;
 	const { shown, prioritized } = selectNestedCalls(nested, tool);
 	const lines = ["[Nested calls]"];
@@ -221,7 +230,10 @@ export default function trace(pi: ExtensionAPI): void {
 	pi.registerCommand("trace", {
 		description:
 			"Inspect recorded tool results on this branch: /trace [failed] [tool]",
-		handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
+		handler: async (
+			args: string,
+			ctx: ExtensionCommandContext,
+		): Promise<void> => {
 			if (!ctx.hasUI)
 				throw new Error("/trace requires an interactive Pi or RPC UI.");
 			const tokens = args.trim() ? args.trim().split(/\s+/u) : [];
@@ -294,6 +306,7 @@ export default function trace(pi: ExtensionAPI): void {
 							time: entry.timestamp,
 							msg,
 							preview,
+							nested,
 							hasFailedNestedCall,
 						},
 					];
@@ -324,34 +337,43 @@ export default function trace(pi: ExtensionAPI): void {
 				const options = [...labels];
 				if (offset) options.push(NEWER);
 				if (offset + page.length < results.length) options.push(OLDER);
-				const pick = await ctx.ui.select(
-					`Tool trace (${offset + 1}-${offset + page.length} of ${results.length})`,
-					options,
-					{ signal },
-				);
+				let pick: string | undefined;
+				try {
+					pick = await ctx.ui.select(
+						`Tool trace (${offset + 1}-${offset + page.length} of ${results.length})`,
+						options,
+						{ signal },
+					);
+				} catch {
+					return;
+				}
 				if (signal.aborted || !pick || !options.includes(pick)) return;
 				if (pick === NEWER) offset -= PAGE_SIZE;
 				else if (pick === OLDER) offset += PAGE_SIZE;
 				else {
 					const selected = page[labels.indexOf(pick)];
 					if (!selected) return;
-					if (
-						!ctx.sessionManager
-							.getBranch()
-							.some((entry: SessionEntry) => entry.id === selected.id)
-					) {
+					try {
+						if (
+							!ctx.sessionManager
+								.getBranch()
+								.some((entry: SessionEntry) => entry.id === selected.id)
+						) {
+							ctx.ui.notify(
+								"The selected result is no longer on this branch.",
+								"warning",
+							);
+							return;
+						}
 						ctx.ui.notify(
-							"The selected result is no longer on this branch.",
-							"warning",
+							`${pick}\n${diagnostic(selected.msg, tool, selected.nested)}`,
+							selected.msg.isError || selected.hasFailedNestedCall
+								? "warning"
+								: "info",
 						);
+					} catch {
 						return;
 					}
-					ctx.ui.notify(
-						`${pick}\n${diagnostic(selected.msg, tool)}`,
-						selected.msg.isError || selected.hasFailedNestedCall
-							? "warning"
-							: "info",
-					);
 				}
 			}
 		},

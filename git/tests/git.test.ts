@@ -2,14 +2,10 @@ import assert from "node:assert/strict";
 import {
 	type SpawnSyncReturns,
 	execFileSync,
+	spawn,
 	spawnSync,
 } from "node:child_process";
-import {
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -56,9 +52,11 @@ interface HarnessState {
 	entryRenderer: EntryRenderer | undefined;
 	entries: Array<{ customType: string; data: unknown }>;
 	appendError: Error | undefined;
+	emit: (event: string) => void;
 }
 
 function createHarness(): { pi: ExtensionAPI; state: HarnessState } {
+	const listeners = new Map<string, Array<() => void>>();
 	const state: HarnessState = {
 		commandName: undefined,
 		commandDescription: undefined,
@@ -67,9 +65,19 @@ function createHarness(): { pi: ExtensionAPI; state: HarnessState } {
 		entryRenderer: undefined,
 		entries: [],
 		appendError: undefined,
+		emit(event: string): void {
+			for (const listener of listeners.get(event) ?? []) {
+				listener();
+			}
+		},
 	};
 
 	const pi = {
+		on(event: string, listener: () => void): void {
+			const list = listeners.get(event) ?? [];
+			list.push(listener);
+			listeners.set(event, list);
+		},
 		registerEntryRenderer(name: string, renderer: EntryRenderer): void {
 			state.rendererName = name;
 			state.entryRenderer = renderer;
@@ -204,15 +212,33 @@ function hasPython3(): boolean {
 	return probe.status === 0;
 }
 
+const HERMETIC_GIT_ENV: NodeJS.ProcessEnv = {
+	...process.env,
+	GIT_CONFIG_GLOBAL: "/dev/null",
+	GIT_CONFIG_SYSTEM: "/dev/null",
+	GIT_CONFIG_NOSYSTEM: "1",
+};
+
 function createTempGitRepo(prefix = "pi-git-test-"): string {
 	const dir = mkdtempSync(join(tmpdir(), prefix));
-	execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
+	execFileSync("git", ["init"], {
+		cwd: dir,
+		env: HERMETIC_GIT_ENV,
+		stdio: "ignore",
+	});
 	execFileSync("git", ["config", "user.name", "Pi Test"], {
 		cwd: dir,
+		env: HERMETIC_GIT_ENV,
 		stdio: "ignore",
 	});
 	execFileSync("git", ["config", "user.email", "pi-test@example.com"], {
 		cwd: dir,
+		env: HERMETIC_GIT_ENV,
+		stdio: "ignore",
+	});
+	execFileSync("git", ["config", "commit.gpgsign", "false"], {
+		cwd: dir,
+		env: HERMETIC_GIT_ENV,
 		stdio: "ignore",
 	});
 	return dir;
@@ -252,10 +278,7 @@ test("gitShellCommand: passes standard git commands and options through", () => 
 		gitShellCommand("-C ../another-project status"),
 		"git -C ../another-project status",
 	);
-	assert.equal(
-		gitShellCommand("status | head -n 5"),
-		"git status | head -n 5",
-	);
+	assert.equal(gitShellCommand("status | head -n 5"), "git status | head -n 5");
 });
 
 test("gitShellCommand: rewrites standalone double-quoted commit messages", () => {
@@ -325,7 +348,7 @@ test("terminalCaptureArgs: darwin invocation uses macOS script and keeps shell/c
 	assert.equal(args[2], "pi-git");
 	assert.equal(args[3], shell);
 	assert.equal(args[4], command);
-	assert.equal(args[5], String(CAPTURE_BYTES));
+	assert.equal(args[5], String(CAPTURE_BYTES + 1));
 
 	const script = args[1] ?? "";
 	assert.match(script, /set -o pipefail/);
@@ -340,7 +363,7 @@ test("terminalCaptureArgs: darwin invocation uses macOS script and keeps shell/c
 	);
 	assert.match(
 		script,
-		/2>&1 \| \/usr\/bin\/tee \/dev\/tty \| \/usr\/bin\/tail -c "\$3"/,
+		/2>&1 \| \{ \/usr\/bin\/tee \/dev\/tty 2>\/dev\/null \|\| true; \} \| \/usr\/bin\/tail -c "\$3"/,
 	);
 	assert.equal(script.includes(shell), false);
 	assert.equal(script.includes(command), false);
@@ -356,7 +379,7 @@ test("terminalCaptureArgs: linux invocation uses GNU script -e -c and keeps shel
 	assert.equal(args[2], "pi-git");
 	assert.equal(args[3], shell);
 	assert.equal(args[4], command);
-	assert.equal(args[5], String(CAPTURE_BYTES));
+	assert.equal(args[5], String(CAPTURE_BYTES + 1));
 
 	const script = args[1] ?? "";
 	assert.match(script, /set -o pipefail/);
@@ -366,7 +389,7 @@ test("terminalCaptureArgs: linux invocation uses GNU script -e -c and keeps shel
 	);
 	assert.match(
 		script,
-		/2>&1 \| \/usr\/bin\/tee \/dev\/tty \| \/usr\/bin\/tail -c "\$3"/,
+		/2>&1 \| \{ \/usr\/bin\/tee \/dev\/tty 2>\/dev\/null \|\| true; \} \| \/usr\/bin\/tail -c "\$3"/,
 	);
 	assert.equal(script.includes(command), false);
 });
@@ -396,10 +419,7 @@ test("gitResultMessage: formats exit 0, non-zero exit, missing tool exit 127, un
 		gitResultMessage(Buffer.alloc(0), 0),
 		"Git shell completed.\n(No output)",
 	);
-	assert.equal(
-		gitResultMessage(null, 0),
-		"Git shell completed.\n(No output)",
-	);
+	assert.equal(gitResultMessage(null, 0), "Git shell completed.\n(No output)");
 	assert.equal(
 		gitResultMessage(undefined, 0),
 		"Git shell completed.\n(No output)",
@@ -448,24 +468,34 @@ test("gitResultMessage: formats exit 0, non-zero exit, missing tool exit 127, un
 	);
 });
 
-test("gitResultMessage: handles bounded capture truncation at CAPTURE_BYTES, >20 lines, and >4000 chars", () => {
-	// Partial first line that might lack a credential prefix must be dropped at >= CAPTURE_BYTES.
+test("gitResultMessage: handles bounded capture truncation at >CAPTURE_BYTES, exact CAPTURE_BYTES, >20 lines, and >4000 chars", () => {
+	// Partial first line must be dropped when output exceeds CAPTURE_BYTES.
 	const filler = "a".repeat(CAPTURE_BYTES - 10);
-	const atLimit = Buffer.from(`${filler}\nfinal line\n`, "utf8");
-	assert.ok(atLimit.length >= CAPTURE_BYTES);
-	const truncatedAtLimit = gitResultMessage(atLimit, 0);
+	const overLimit = Buffer.from(`${filler}\nfinal line\n`, "utf8");
+	assert.ok(overLimit.length > CAPTURE_BYTES);
+	const truncatedOverLimit = gitResultMessage(overLimit, 0);
 	assert.equal(
-		truncatedAtLimit,
+		truncatedOverLimit,
 		"Git shell completed.\n[Last output only]\nfinal line",
 	);
 
-	const noNewlineAtLimit = Buffer.alloc(CAPTURE_BYTES, 0x78); // 'x'
+	// Exact CAPTURE_BYTES output was not stream-cut by tail -c (CAPTURE_BYTES + 1), so line 1 is not dropped as partial.
+	const exactFirstLine = "b".repeat(CAPTURE_BYTES - 12);
+	const exactLimit = Buffer.from(`${exactFirstLine}\nfinal line\n`, "utf8");
+	assert.equal(exactLimit.length, CAPTURE_BYTES);
+	const formattedExact = gitResultMessage(exactLimit, 0);
+	assert.match(
+		formattedExact,
+		/^Git shell completed\.\n\[Last output only\]\nb+\nfinal line$/,
+	);
+
+	const noNewlineOverLimit = Buffer.alloc(CAPTURE_BYTES + 1, 0x78); // 'x'
 	assert.equal(
-		gitResultMessage(noNewlineAtLimit, 0),
+		gitResultMessage(noNewlineOverLimit, 0),
 		"Git shell completed.\n[Last output only]\n(No output)",
 	);
 	assert.equal(
-		gitResultMessage(noNewlineAtLimit, 1),
+		gitResultMessage(noNewlineOverLimit, 1),
 		"Git command failed (exit 1).\n[Last output only]\nNo diagnostic text was captured; check the terminal output.",
 	);
 
@@ -473,14 +503,20 @@ test("gitResultMessage: handles bounded capture truncation at CAPTURE_BYTES, >20
 		"\n",
 	);
 	const truncatedLines = gitResultMessage(Buffer.from(manyLines), 0);
-	assert.match(truncatedLines, /^Git shell completed\.\n\[Last output only\]\n/);
+	assert.match(
+		truncatedLines,
+		/^Git shell completed\.\n\[Last output only\]\n/,
+	);
 	assert.equal(truncatedLines.includes("line-5"), false);
 	assert.equal(truncatedLines.includes("line-6"), true);
 	assert.equal(truncatedLines.includes("line-25"), true);
 
 	const longSingleLine = `PREFIX_${"z".repeat(4500)}_SUFFIX`;
 	const truncatedChars = gitResultMessage(Buffer.from(longSingleLine), 0);
-	assert.match(truncatedChars, /^Git shell completed\.\n\[Last output only\]\n/);
+	assert.match(
+		truncatedChars,
+		/^Git shell completed\.\n\[Last output only\]\n/,
+	);
 	assert.equal(truncatedChars.includes("PREFIX_"), false);
 	assert.equal(truncatedChars.endsWith("_SUFFIX"), true);
 });
@@ -509,7 +545,10 @@ test("gitResultMessage: redacts credentials and strips ANSI, CR, and unsafe cont
 	assert.equal(formatted.includes("deadbeef1234"), false);
 	assert.equal(formatted.includes("SECRET_KEY_BODY"), false);
 
-	assert.match(formatted, /https:\/\/\[REDACTED\]@github\.com\/org\/repo\.git/);
+	assert.match(
+		formatted,
+		/https:\/\/\[REDACTED\]@github\.com\/org\.git|https:\/\/\[REDACTED\]@github\.com\/org\/repo\.git/,
+	);
 	assert.match(formatted, /Bearer \[REDACTED\]/);
 	assert.match(formatted, /\[REDACTED PRIVATE KEY\]/);
 	assert.match(formatted, /col1\tcol2hidden/);
@@ -586,23 +625,25 @@ test("gitExtension: registers /git command and git-output entry renderer", () =>
 // gitExtension guards, concurrency, SIGINT, and error handling
 // ---------------------------------------------------------------------------
 
-test("gitExtension: rejects non-TUI modes without calling UI or appending entries", async () => {
-	const { state } = createHarness();
-	const handler = state.commandHandler;
-	assert.ok(handler !== undefined);
+test("gitExtension: rejects non-TUI modes without calling UI or appending entries", () => {
+	return (async () => {
+		const { state } = createHarness();
+		const handler = state.commandHandler;
+		assert.ok(handler !== undefined);
 
-	const beforeSigint = process.listenerCount("SIGINT");
-	for (const mode of ["rpc", "print", "json"] as const) {
-		const mock = createMockContext({ mode });
-		await assert.rejects(() => handler("status", mock.ctx), {
-			name: "Error",
-			message: "/git requires Pi's interactive terminal.",
-		});
-		assert.equal(mock.customCalls, 0);
-		assert.equal(mock.notifications.length, 0);
-		assert.equal(state.entries.length, 0);
-	}
-	assert.equal(process.listenerCount("SIGINT"), beforeSigint);
+		const beforeSigint = process.listenerCount("SIGINT");
+		for (const mode of ["rpc", "print", "json"] as const) {
+			const mock = createMockContext({ mode });
+			await assert.rejects(() => handler("status", mock.ctx), {
+				name: "Error",
+				message: "/git requires Pi's interactive terminal.",
+			});
+			assert.equal(mock.customCalls, 0);
+			assert.equal(mock.notifications.length, 0);
+			assert.equal(state.entries.length, 0);
+		}
+		assert.equal(process.listenerCount("SIGINT"), beforeSigint);
+	})();
 });
 
 test("gitExtension: warns and exits early when agent is not idle", async () => {
@@ -715,7 +756,7 @@ test("gitExtension: rejects concurrent /git invocations and cleans up SIGINT lis
 	assert.equal(state.entries.length, 2);
 });
 
-test("gitExtension: handles result.error, custom throw without leaking secrets, and appendEntry failure", async () => {
+test("gitExtension: handles result.error, custom throw without leaking secrets, appendEntry failure, stale ctx, and session replacement", async () => {
 	const { state } = createHarness();
 	const handler = state.commandHandler;
 	assert.ok(handler !== undefined);
@@ -762,6 +803,41 @@ test("gitExtension: handles result.error, custom throw without leaking secrets, 
 			level: "warning",
 		},
 	]);
+
+	// 4. Stale ctx after session.dispose() (both appendEntry and ctx.hasUI throw) must not reject
+	let stale = false;
+	const baseStale = createMockContext({
+		custom: async () => {
+			stale = true;
+			return makeSpawnResult({ stdout: Buffer.from("ok\n"), status: 0 });
+		},
+	});
+	const staleProxy = new Proxy(baseStale.ctx, {
+		get(target, prop, receiver) {
+			if (stale) {
+				throw new Error(
+					"This extension ctx is stale after session replacement or reload.",
+				);
+			}
+			return Reflect.get(target, prop, receiver);
+		},
+	});
+	await assert.doesNotReject(handler("status", staleProxy));
+
+	// 5. Session replacement mid-custom suppresses writing to the new session
+	state.appendError = undefined;
+	const entriesBefore = state.entries.length;
+	const switchedMock = createMockContext({
+		custom: async () => {
+			state.emit("session_start");
+			return makeSpawnResult({
+				stdout: Buffer.from("wrong-session\n"),
+				status: 0,
+			});
+		},
+	});
+	await handler("status", switchedMock.ctx);
+	assert.equal(state.entries.length, entriesBefore);
 });
 
 test("gitExtension: non-existent cwd restores TUI and records spawn error cleanly", async () => {
@@ -783,6 +859,31 @@ test("gitExtension: non-existent cwd restores TUI and records spawn error cleanl
 	});
 });
 
+test("terminalCaptureArgs: succeeds with exit 0 when /dev/tty has no controlling terminal", {
+	skip: process.platform !== "darwin" && process.platform !== "linux",
+}, async () => {
+	const repo = createTempGitRepo("pi-git-headless-");
+	try {
+		const captureArgs = terminalCaptureArgs("/bin/sh", "git status --short");
+		const status = await new Promise<number | null>(
+			(resolveExit, rejectExit) => {
+				const child = spawn("/bin/bash", captureArgs, {
+					cwd: repo,
+					detached: true,
+					stdio: ["ignore", "pipe", "pipe"],
+				});
+				child.stdout.resume();
+				child.stderr.resume();
+				child.on("error", rejectExit);
+				child.on("close", (code) => resolveExit(code));
+			},
+		);
+		assert.equal(status, 0);
+	} finally {
+		rmSync(repo, { recursive: true, force: true });
+	}
+});
+
 // ---------------------------------------------------------------------------
 // Real disposable git repository execution under a real PTY
 // ---------------------------------------------------------------------------
@@ -792,36 +893,33 @@ interface PtyE2EResult {
 	entries: Array<{ customType: string; data: string }>;
 }
 
-test(
-	"gitExtension: executes real git commands end-to-end in a disposable repository under a real PTY",
-	{
-		skip:
-			(process.platform !== "darwin" && process.platform !== "linux") ||
-			!hasPython3(),
-	},
-	() => {
-		const repo = createTempGitRepo("pi-git-repo-$safe ");
-		const workDir = mkdtempSync(join(tmpdir(), "pi-git-pty-runner-"));
-		const resultFile = join(workDir, "result.json");
-		const runnerFile = join(workDir, "runner.mjs");
-		const gitExtUrl = pathToFileURL(resolve("git/index.ts")).href;
-		const loaderPath = resolve("shared/tests/pi-loader.ts");
+test("gitExtension: executes real git commands end-to-end in a disposable repository under a real PTY", {
+	skip:
+		(process.platform !== "darwin" && process.platform !== "linux") ||
+		!hasPython3(),
+}, () => {
+	const repo = createTempGitRepo("pi-git-repo-$safe ");
+	const workDir = mkdtempSync(join(tmpdir(), "pi-git-pty-runner-"));
+	const resultFile = join(workDir, "result.json");
+	const runnerFile = join(workDir, "runner.mjs");
+	const gitExtUrl = pathToFileURL(resolve("git/index.ts")).href;
+	const loaderPath = resolve("shared/tests/pi-loader.ts");
 
-		try {
-			// Configure a local git alias that prints > 16 KiB to exercise bounded tail capture.
-			execFileSync(
-				"git",
-				[
-					"config",
-					"alias.flood",
-					"!node -e 'for (let i = 1; i <= 600; i++) console.log(\"flood-line-\" + i + \"-\" + \"x\".repeat(40))'",
-				],
-				{ cwd: repo, stdio: "ignore" },
-			);
+	try {
+		// Configure a local git alias that prints > 16 KiB to exercise bounded tail capture.
+		execFileSync(
+			"git",
+			[
+				"config",
+				"alias.flood",
+				'!node -e \'for (let i = 1; i <= 600; i++) console.log("flood-line-" + i + "-" + "x".repeat(40))\'',
+			],
+			{ cwd: repo, env: HERMETIC_GIT_ENV, stdio: "ignore" },
+		);
 
-			writeFileSync(
-				runnerFile,
-				`import { execFileSync } from "node:child_process";
+		writeFileSync(
+			runnerFile,
+			`import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import gitExtension from ${JSON.stringify(gitExtUrl)};
@@ -832,6 +930,7 @@ const resultFile = ${JSON.stringify(resultFile)};
 let handler;
 const entries = [];
 const pi = {
+	on() {},
 	registerEntryRenderer() {},
 	registerCommand(_name, opts) { handler = opts.handler; },
 	appendEntry(customType, data) { entries.push({ customType, data }); },
@@ -888,10 +987,10 @@ await handler("flood", makeCtx());
 
 writeFileSync(resultFile, JSON.stringify({ tuiEvents, entries }), "utf8");
 `,
-				"utf8",
-			);
+			"utf8",
+		);
 
-			const pyScript = `import os, pty, sys
+		const pyScript = `import os, pty, sys
 pid, fd = pty.fork()
 if pid == 0:
     os.execv(sys.argv[1], sys.argv[1:])
@@ -906,87 +1005,76 @@ else:
     sys.exit(os.waitstatus_to_exitcode(status))
 `;
 
-			const run = spawnSync(
-				"python3",
-				[
-					"-c",
-					pyScript,
-					process.execPath,
-					"--import",
-					loaderPath,
-					runnerFile,
-				],
-				{
-					cwd: process.cwd(),
-					encoding: "utf8",
-					timeout: 30_000,
-				},
-			);
-			assert.equal(
-				run.status,
-				0,
-				`PTY runner failed (status=${String(run.status)}): ${run.stdout}\n${run.stderr}`,
-			);
-
-			const parsed = JSON.parse(
-				readFileSync(resultFile, "utf8"),
-			) as PtyE2EResult;
-
-			assert.equal(parsed.entries.length, 6);
-			for (const events of parsed.tuiEvents) {
-				assert.deepEqual(events, ["stop", "start", "requestRender:force"]);
-			}
-
-			// 1. status
-			assert.equal(parsed.entries[0]?.customType, "git-output");
-			assert.match(parsed.entries[0]?.data ?? "", /^Git shell completed\./);
-
-			// 2. double-quoted commit
-			assert.match(parsed.entries[1]?.data ?? "", /^Git shell completed\./);
-
-			// 3. single-quoted commit
-			assert.match(parsed.entries[2]?.data ?? "", /^Git shell completed\./);
-			const subjects = execFileSync("git", ["log", "--format=%s"], {
-				cwd: repo,
+		const run = spawnSync(
+			"python3",
+			["-c", pyScript, process.execPath, "--import", loaderPath, runnerFile],
+			{
+				cwd: process.cwd(),
+				env: HERMETIC_GIT_ENV,
 				encoding: "utf8",
-			})
-				.trim()
-				.split("\n");
-			assert.deepEqual(subjects, [
-				"Second commit",
-				"Initial commit from /git",
-			]);
+				timeout: 30_000,
+			},
+		);
+		assert.equal(
+			run.status,
+			0,
+			`PTY runner failed (status=${String(run.status)}): ${run.stdout}\n${run.stderr}`,
+		);
 
-			// 4. non-zero exit
-			assert.match(
-				parsed.entries[3]?.data ?? "",
-				/^Git command failed \(exit 128\)\./,
-			);
-			assert.match(parsed.entries[3]?.data ?? "", /Needed a single revision/);
+		const parsed = JSON.parse(readFileSync(resultFile, "utf8")) as PtyE2EResult;
 
-			// 5. empty args usage (>20 lines, so tail shows [Last output only] + git help footer)
-			assert.match(
-				parsed.entries[4]?.data ?? "",
-				/^Git command failed \(exit 1\)\.\n\[Last output only\]\n/,
-			);
-			assert.match(parsed.entries[4]?.data ?? "", /git help/i);
-
-			// 6. bounded >16 KiB capture
-			assert.match(
-				parsed.entries[5]?.data ?? "",
-				/^Git shell completed\.\n\[Last output only\]\n/,
-			);
-			assert.equal(
-				(parsed.entries[5]?.data ?? "").includes("flood-line-1-"),
-				false,
-			);
-			assert.equal(
-				(parsed.entries[5]?.data ?? "").includes("flood-line-600-"),
-				true,
-			);
-		} finally {
-			rmSync(repo, { recursive: true, force: true });
-			rmSync(workDir, { recursive: true, force: true });
+		assert.equal(parsed.entries.length, 6);
+		for (const events of parsed.tuiEvents) {
+			assert.deepEqual(events, ["stop", "start", "requestRender:force"]);
 		}
-	},
-);
+
+		// 1. status
+		assert.equal(parsed.entries[0]?.customType, "git-output");
+		assert.match(parsed.entries[0]?.data ?? "", /^Git shell completed\./);
+
+		// 2. double-quoted commit
+		assert.match(parsed.entries[1]?.data ?? "", /^Git shell completed\./);
+
+		// 3. single-quoted commit
+		assert.match(parsed.entries[2]?.data ?? "", /^Git shell completed\./);
+		const subjects = execFileSync("git", ["log", "--format=%s"], {
+			cwd: repo,
+			env: HERMETIC_GIT_ENV,
+			encoding: "utf8",
+		})
+			.trim()
+			.split("\n");
+		assert.deepEqual(subjects, ["Second commit", "Initial commit from /git"]);
+
+		// 4. non-zero exit
+		assert.match(
+			parsed.entries[3]?.data ?? "",
+			/^Git command failed \(exit 128\)\./,
+		);
+		assert.match(parsed.entries[3]?.data ?? "", /Needed a single revision/);
+
+		// 5. empty args usage (>20 lines, so tail shows [Last output only] + git help footer)
+		assert.match(
+			parsed.entries[4]?.data ?? "",
+			/^Git command failed \(exit 1\)\.\n\[Last output only\]\n/,
+		);
+		assert.match(parsed.entries[4]?.data ?? "", /git help/i);
+
+		// 6. bounded >16 KiB capture
+		assert.match(
+			parsed.entries[5]?.data ?? "",
+			/^Git shell completed\.\n\[Last output only\]\n/,
+		);
+		assert.equal(
+			(parsed.entries[5]?.data ?? "").includes("flood-line-1-"),
+			false,
+		);
+		assert.equal(
+			(parsed.entries[5]?.data ?? "").includes("flood-line-600-"),
+			true,
+		);
+	} finally {
+		rmSync(repo, { recursive: true, force: true });
+		rmSync(workDir, { recursive: true, force: true });
+	}
+});

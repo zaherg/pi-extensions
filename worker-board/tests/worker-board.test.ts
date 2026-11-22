@@ -19,7 +19,12 @@ function makeAssistantEntry(
 	id: string,
 	content: Array<
 		| { type: "text"; text: string }
-		| { type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> }
+		| {
+				type: "toolCall";
+				id: string;
+				name: string;
+				arguments: Record<string, unknown>;
+		  }
 	>,
 ): SessionEntry {
 	return {
@@ -99,13 +104,19 @@ function createBoardHarness(opts?: {
 	mode?: "tui" | "rpc";
 	hasUI?: boolean;
 }) {
-	const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => void>>();
+	const handlers = new Map<
+		string,
+		Array<(event: unknown, ctx: ExtensionContext) => void>
+	>();
 	let commandHandler:
 		| ((args: string, ctx: ExtensionCommandContext) => Promise<void>)
 		| undefined;
 
 	const api = {
-		on(event: string, fn: (event: unknown, ctx: ExtensionContext) => void): () => void {
+		on(
+			event: string,
+			fn: (event: unknown, ctx: ExtensionContext) => void,
+		): () => void {
 			const list = handlers.get(event) ?? [];
 			list.push(fn);
 			handlers.set(event, list);
@@ -113,7 +124,9 @@ function createBoardHarness(opts?: {
 		},
 		registerCommand(
 			name: string,
-			config: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> },
+			config: {
+				handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+			},
 		): void {
 			if (name === "workers") commandHandler = config.handler;
 		},
@@ -128,7 +141,10 @@ function createBoardHarness(opts?: {
 	const widgetCalls: WidgetCall[] = [];
 	const notifications: NotifyCall[] = [];
 
-	const makeContext = (override?: { hasUI?: boolean; mode?: "tui" | "rpc" }): ExtensionContext =>
+	const makeContext = (override?: {
+		hasUI?: boolean;
+		mode?: "tui" | "rpc";
+	}): ExtensionContext =>
 		({
 			hasUI: override?.hasUI ?? hasUI,
 			mode: override?.mode ?? mode,
@@ -157,7 +173,11 @@ function createBoardHarness(opts?: {
 		setHasUI(next: boolean): void {
 			hasUI = next;
 		},
-		emit(eventName: string, event: unknown, ctxOverride?: { hasUI?: boolean; mode?: "tui" | "rpc" }): void {
+		emit(
+			eventName: string,
+			event: unknown,
+			ctxOverride?: { hasUI?: boolean; mode?: "tui" | "rpc" },
+		): void {
 			const ctx = makeContext(ctxOverride);
 			for (const fn of handlers.get(eventName) ?? []) fn(event, ctx);
 		},
@@ -166,7 +186,10 @@ function createBoardHarness(opts?: {
 			ctxOverride?: { hasUI?: boolean; mode?: "tui" | "rpc" },
 		): Promise<void> {
 			assert.ok(commandHandler);
-			await commandHandler(args, makeContext(ctxOverride) as unknown as ExtensionCommandContext);
+			await commandHandler(
+				args,
+				makeContext(ctxOverride) as unknown as ExtensionCommandContext,
+			);
 		},
 	};
 }
@@ -223,7 +246,11 @@ describe("worker-board report: modes, statuses, and priorities", () => {
 					{ agent: "a2", status: "pending" },
 					{ agent: "a3", status: "running" },
 					{ agent: "a4", status: "aborted" },
-					{ agent: "a5", status: "failed", blocker: "ignored when not blocked" },
+					{
+						agent: "a5",
+						status: "failed",
+						blocker: "ignored when not blocked",
+					},
 					{ agent: "a6", status: "blocked", blocker: "needs schema" },
 				],
 			},
@@ -239,29 +266,127 @@ describe("worker-board report: modes, statuses, and priorities", () => {
 	});
 
 	it("infers status from exitCode (0 vs non-zero) and settled stopReason/state variants without exitCode", () => {
-		const cases: Array<{ raw: Record<string, unknown>; expectedText: string; expectedPriority: number }> = [
-			{ raw: { agent: "w", exitCode: 0 }, expectedText: "completed w #s/1", expectedPriority: 4 },
-			{ raw: { agent: "w", exitCode: 137 }, expectedText: "failed w #s/1", expectedPriority: 0 },
-			{ raw: { agent: "w", stopReason: "aborted" }, expectedText: "aborted w #s/1", expectedPriority: 1 },
-			{ raw: { agent: "w", state: "STOPPED" }, expectedText: "aborted w #s/1", expectedPriority: 1 },
-			{ raw: { agent: "w", state: "cancelled" }, expectedText: "aborted w #s/1", expectedPriority: 1 },
-			{ raw: { agent: "w", state: "canceled" }, expectedText: "aborted w #s/1", expectedPriority: 1 },
-			{ raw: { agent: "w", state: "blocked", blocker: "lock" }, expectedText: "blocked w #s/1 · blocked by: lock", expectedPriority: 0 },
-			{ raw: { agent: "w", stopReason: "error" }, expectedText: "failed w #s/1", expectedPriority: 0 },
-			{ raw: { agent: "w", state: "failed" }, expectedText: "failed w #s/1", expectedPriority: 0 },
-			{ raw: { agent: "w", state: "error" }, expectedText: "failed w #s/1", expectedPriority: 0 },
-			{ raw: { agent: "w", state: "completed" }, expectedText: "completed w #s/1", expectedPriority: 4 },
-			{ raw: { agent: "w", state: "complete" }, expectedText: "completed w #s/1", expectedPriority: 4 },
-			{ raw: { agent: "w", state: "succeeded" }, expectedText: "completed w #s/1", expectedPriority: 4 },
-			{ raw: { agent: "w", state: "done" }, expectedText: "completed w #s/1", expectedPriority: 4 },
-			{ raw: { agent: "w", state: "pending" }, expectedText: "last reported pending w #s/1", expectedPriority: 3 },
-			{ raw: { agent: "w", state: "queued" }, expectedText: "last reported pending w #s/1", expectedPriority: 3 },
-			{ raw: { agent: "w", state: "running" }, expectedText: "last reported running w #s/1", expectedPriority: 2 },
-			{ raw: { agent: "w", state: "active" }, expectedText: "last reported running w #s/1", expectedPriority: 2 },
+		const cases: Array<{
+			raw: Record<string, unknown>;
+			expectedText: string;
+			expectedPriority: number;
+		}> = [
+			{
+				raw: { agent: "w", exitCode: 0 },
+				expectedText: "completed w #s/1",
+				expectedPriority: 4,
+			},
+			{
+				raw: { agent: "w", exitCode: 137 },
+				expectedText: "failed w #s/1",
+				expectedPriority: 0,
+			},
+			{
+				raw: { agent: "w", exitCode: 0, stopReason: "error" },
+				expectedText: "failed w #s/1",
+				expectedPriority: 0,
+			},
+			{
+				raw: { agent: "w", exitCode: 0, state: "failed" },
+				expectedText: "failed w #s/1",
+				expectedPriority: 0,
+			},
+			{
+				raw: { agent: "w", stopReason: "stop" },
+				expectedText: "completed w #s/1",
+				expectedPriority: 4,
+			},
+			{
+				raw: { agent: "w", stopReason: "aborted" },
+				expectedText: "aborted w #s/1",
+				expectedPriority: 1,
+			},
+			{
+				raw: { agent: "w", state: "STOPPED" },
+				expectedText: "aborted w #s/1",
+				expectedPriority: 1,
+			},
+			{
+				raw: { agent: "w", state: "cancelled" },
+				expectedText: "aborted w #s/1",
+				expectedPriority: 1,
+			},
+			{
+				raw: { agent: "w", state: "canceled" },
+				expectedText: "aborted w #s/1",
+				expectedPriority: 1,
+			},
+			{
+				raw: { agent: "w", state: "blocked", blocker: "lock" },
+				expectedText: "blocked w #s/1 · blocked by: lock",
+				expectedPriority: 0,
+			},
+			{
+				raw: { agent: "w", stopReason: "error" },
+				expectedText: "failed w #s/1",
+				expectedPriority: 0,
+			},
+			{
+				raw: { agent: "w", state: "failed" },
+				expectedText: "failed w #s/1",
+				expectedPriority: 0,
+			},
+			{
+				raw: { agent: "w", state: "error" },
+				expectedText: "failed w #s/1",
+				expectedPriority: 0,
+			},
+			{
+				raw: { agent: "w", state: "completed" },
+				expectedText: "completed w #s/1",
+				expectedPriority: 4,
+			},
+			{
+				raw: { agent: "w", state: "complete" },
+				expectedText: "completed w #s/1",
+				expectedPriority: 4,
+			},
+			{
+				raw: { agent: "w", state: "succeeded" },
+				expectedText: "completed w #s/1",
+				expectedPriority: 4,
+			},
+			{
+				raw: { agent: "w", state: "done" },
+				expectedText: "completed w #s/1",
+				expectedPriority: 4,
+			},
+			{
+				raw: { agent: "w", state: "pending" },
+				expectedText: "last reported pending w #s/1",
+				expectedPriority: 3,
+			},
+			{
+				raw: { agent: "w", state: "queued" },
+				expectedText: "last reported pending w #s/1",
+				expectedPriority: 3,
+			},
+			{
+				raw: { agent: "w", state: "running" },
+				expectedText: "last reported running w #s/1",
+				expectedPriority: 2,
+			},
+			{
+				raw: { agent: "w", state: "active" },
+				expectedText: "last reported running w #s/1",
+				expectedPriority: 2,
+			},
 		];
 		for (const c of cases) {
-			const rows = workerRows("s", {}, { mode: "single", results: [c.raw] }, "finished");
-			assert.deepEqual(rows, [{ priority: c.expectedPriority, text: c.expectedText }]);
+			const rows = workerRows(
+				"s",
+				{},
+				{ mode: "single", results: [c.raw] },
+				"finished",
+			);
+			assert.deepEqual(rows, [
+				{ priority: c.expectedPriority, text: c.expectedText },
+			]);
 		}
 
 		// Prototype keys like "toString" are rejected as status
@@ -271,7 +396,9 @@ describe("worker-board report: modes, statuses, and priorities", () => {
 			{ mode: "single", results: [{ agent: "w", status: "toString" }] },
 			"finished",
 		);
-		assert.deepEqual(protoRows, [{ priority: 1, text: "#s/1 Unsupported worker report." }]);
+		assert.deepEqual(protoRows, [
+			{ priority: 1, text: "#s/1 Unsupported worker report." },
+		]);
 	});
 
 	it("scans messages backward for toolResult/toolCall and falls back to toolCalls", () => {
@@ -358,23 +485,28 @@ describe("worker-board report: modes, statuses, and priorities", () => {
 		assert.deepEqual(workerRows("f1", {}, undefined, "failed"), [
 			{ priority: 0, text: "#f1 Call failed; no worker outcome reported." },
 		]);
-		assert.deepEqual(workerRows("i1", {}, { mode: "unknown", results: [] }, "finished"), [
-			{ priority: 1, text: "#i1 No compatible worker report." },
-		]);
-		assert.deepEqual(workerRows("i2", {}, { mode: "single", results: "bad" }, "live"), [
-			{ priority: 1, text: "#i2 No compatible worker report." },
-		]);
+		assert.deepEqual(
+			workerRows("i1", {}, { mode: "unknown", results: [] }, "finished"),
+			[{ priority: 1, text: "#i1 No compatible worker report." }],
+		);
+		assert.deepEqual(
+			workerRows("i2", {}, { mode: "single", results: "bad" }, "live"),
+			[{ priority: 1, text: "#i2 No compatible worker report." }],
+		);
 
 		// Empty results: [] (e.g. declined confirmation)
-		assert.deepEqual(workerRows("d1", {}, { mode: "single", results: [] }, "finished"), [
-			{ priority: 1, text: "#d1 No worker outcome reported." },
-		]);
-		assert.deepEqual(workerRows("d2", {}, { mode: "single", results: [] }, "live"), [
-			{ priority: 1, text: "#d2 Awaiting worker report." },
-		]);
-		assert.deepEqual(workerRows("d3", {}, { mode: "single", results: [] }, "failed"), [
-			{ priority: 0, text: "#d3 Call failed; no worker outcome reported." },
-		]);
+		assert.deepEqual(
+			workerRows("d1", {}, { mode: "single", results: [] }, "finished"),
+			[{ priority: 1, text: "#d1 No worker outcome reported." }],
+		);
+		assert.deepEqual(
+			workerRows("d2", {}, { mode: "single", results: [] }, "live"),
+			[{ priority: 1, text: "#d2 Awaiting worker report." }],
+		);
+		assert.deepEqual(
+			workerRows("d3", {}, { mode: "single", results: [] }, "failed"),
+			[{ priority: 0, text: "#d3 Call failed; no worker outcome reported." }],
+		);
 
 		// Malformed slots and unshifted Call failed. banner when phase=failed without failed/aborted worker
 		const malformed = workerRows(
@@ -406,11 +538,13 @@ describe("worker-board report: modes, statuses, and priorities", () => {
 			{ mode: "single", results: [{ agent: "dev", exitCode: 1 }] },
 			"failed",
 		);
-		assert.deepEqual(alreadyFailed, [{ priority: 0, text: "failed dev #af/1" }]);
+		assert.deepEqual(alreadyFailed, [
+			{ priority: 0, text: "failed dev #af/1" },
+		]);
 	});
 
-	it("handles workflowChildren.children, top-level array tolerance, details.workflow metadata, and failure banners", () => {
-		// workflowChildren.children with failure banner when no child failed
+	it("handles workflowChildren.children, top-level array tolerance, details.workflow metadata, and failure/stop banners", () => {
+		// workflowChildren.children with failure banner when no child failed + child blocker
 		const withBanner = workerRows(
 			"wf1",
 			{ workflow: "release" },
@@ -432,6 +566,11 @@ describe("worker-board report: modes, statuses, and priorities", () => {
 							exitCode: 0,
 							messages: [{ role: "toolResult", toolName: "read" }],
 						},
+						{
+							agent: "approver",
+							status: "blocked",
+							blocker: "awaiting release sign-off",
+						},
 						"bad-slot",
 					],
 				},
@@ -440,9 +579,33 @@ describe("worker-board report: modes, statuses, and priorities", () => {
 		);
 		assert.deepEqual(withBanner, [
 			{ priority: 0, text: "#wf1 Workflow failed (timeout)." },
-			{ priority: 2, text: "last reported running builder #wf1/1 · build-step · last: bash" },
+			{
+				priority: 2,
+				text: "last reported running builder #wf1/1 · build-step · last: bash",
+			},
 			{ priority: 4, text: "completed child-2 #wf1/2 · last: read" },
-			{ priority: 1, text: "#wf1/3 Unsupported worker report." },
+			{
+				priority: 0,
+				text: "blocked approver #wf1/3 · blocked by: awaiting release sign-off",
+			},
+			{ priority: 1, text: "#wf1/4 Unsupported worker report." },
+		]);
+
+		// Stopped workflow with completed earlier child emits Workflow stopped (...) banner
+		const stoppedWithChild = workerRows(
+			"wf-stop",
+			{ workflow: "deploy" },
+			{
+				mode: "workflow",
+				results: [],
+				workflow: { state: "stopped", stopCause: "user_cancel" },
+				workflowChildren: [{ agent: "step1", status: "completed" }],
+			},
+			"finished",
+		);
+		assert.deepEqual(stoppedWithChild, [
+			{ priority: 1, text: "#wf-stop Workflow stopped (user_cancel)." },
+			{ priority: 4, text: "completed step1 #wf-stop/1" },
 		]);
 
 		// Top-level workflowChildren array tolerance + no duplicate banner when a child failed
@@ -490,7 +653,12 @@ describe("worker-board report: modes, statuses, and priorities", () => {
 				},
 				"finished",
 			),
-			[{ priority: 1, text: "aborted deploy #wf4 · Ship v2 · stopped: user_cancel" }],
+			[
+				{
+					priority: 1,
+					text: "aborted deploy #wf4 · Ship v2 · stopped: user_cancel",
+				},
+			],
 		);
 		assert.deepEqual(
 			workerRows(
@@ -504,7 +672,12 @@ describe("worker-board report: modes, statuses, and priorities", () => {
 				},
 				"finished",
 			),
-			[{ priority: 2, text: "last reported running ci #wf5 · Run suite · async" }],
+			[
+				{
+					priority: 2,
+					text: "last reported running ci #wf5 · Run suite · async",
+				},
+			],
 		);
 		assert.deepEqual(
 			workerRows(
@@ -538,10 +711,7 @@ describe("worker-board report: modes, statuses, and priorities", () => {
 		const parallelLive = workerRows(
 			"ap",
 			{
-				tasks: [
-					{ agent: "scout", task: "Check API" },
-					{ task: "Check DB" },
-				],
+				tasks: [{ agent: "scout", task: "Check API" }, { task: "Check DB" }],
 			},
 			{ mode: "parallel", results: [], asyncId: "job-1" },
 			"live",
@@ -584,7 +754,12 @@ describe("worker-board report: modes, statuses, and priorities", () => {
 				},
 				"finished",
 			),
-			[{ priority: 4, text: "completed management:cancel #mg1 · state: terminated" }],
+			[
+				{
+					priority: 4,
+					text: "completed management:cancel #mg1 · state: terminated",
+				},
+			],
 		);
 		assert.deepEqual(
 			workerRows(
@@ -649,7 +824,12 @@ describe("worker-board report: modes, statuses, and priorities", () => {
 				details: { mode: "single", results: [{ agent: "old", exitCode: 0 }] },
 			}),
 			makeAssistantEntry("new-a", [
-				{ type: "toolCall", id: "tc-1", name: "bash", arguments: { command: "ls" } },
+				{
+					type: "toolCall",
+					id: "tc-1",
+					name: "bash",
+					arguments: { command: "ls" },
+				},
 				{
 					type: "toolCall",
 					id: "tc-2",
@@ -672,7 +852,12 @@ describe("worker-board report: modes, statuses, and priorities", () => {
 			// Newer assistant message with NO subagent calls should be skipped
 			makeAssistantEntry("later-a", [
 				{ type: "text", text: "Wrapping up" },
-				{ type: "toolCall", id: "tc-4", name: "read", arguments: { path: "README.md" } },
+				{
+					type: "toolCall",
+					id: "tc-4",
+					name: "read",
+					arguments: { path: "README.md" },
+				},
 			]),
 		];
 
@@ -724,7 +909,11 @@ describe("worker-board extension: live events, /workers command, and TUI renderi
 		assert.equal(h.widgetCalls[0]?.key, "worker-board");
 		assert.ok(Array.isArray(h.widgetCalls[0]?.value));
 		assert.ok(h.widgetCalls[0]?.value[0]?.includes("current batch"));
-		assert.ok(h.widgetCalls[0]?.value.some((l) => l.includes("#sub-1 Awaiting worker report.")));
+		assert.ok(
+			h.widgetCalls[0]?.value.some((l) =>
+				l.includes("#sub-1 Awaiting worker report."),
+			),
+		);
 
 		// Update with live details
 		h.emit("tool_execution_update", {
@@ -747,7 +936,9 @@ describe("worker-board extension: live events, /workers command, and TUI renderi
 		const updateLines = h.widgetCalls[1]?.value;
 		assert.ok(Array.isArray(updateLines));
 		assert.ok(
-			updateLines.includes("running coder #sub-1/1 · Implement tests · last: edit"),
+			updateLines.includes(
+				"running coder #sub-1/1 · Implement tests · last: edit",
+			),
 		);
 
 		// End with failure
@@ -768,7 +959,7 @@ describe("worker-board extension: live events, /workers command, and TUI renderi
 		assert.ok(endLines.includes("failed coder #sub-1/1 · Implement tests"));
 	});
 
-	it("supports /workers display, pagination, invalid usage, hide suppression, and lifecycle refresh", async () => {
+	it("supports /workers display, pagination, invalid usage, hide suppression (even across out-of-range page), and session_start/lifecycle refresh", async () => {
 		const tasks = Array.from({ length: 8 }, (_, i) => ({
 			agent: `agent-${i + 1}`,
 			task: `Task ${i + 1}`,
@@ -779,7 +970,12 @@ describe("worker-board extension: live events, /workers command, and TUI renderi
 		}));
 		const branch: SessionEntry[] = [
 			makeAssistantEntry("a1", [
-				{ type: "toolCall", id: "tc-p", name: "subagent", arguments: { tasks } },
+				{
+					type: "toolCall",
+					id: "tc-p",
+					name: "subagent",
+					arguments: { tasks },
+				},
 			]),
 			makeToolResultEntry({
 				id: "r-p",
@@ -826,9 +1022,10 @@ describe("worker-board extension: live events, /workers command, and TUI renderi
 		assert.ok(Array.isArray(p2));
 		assert.equal(p2[0], "Workers · last recorded batch · 2/2");
 
-		// /workers hide closes and prevents auto-open during the same turn
+		// /workers hide closes and prevents auto-open during the same turn — EVEN after an out-of-range `/workers 99`!
 		await h.runWorkers("hide");
 		assert.equal(h.widgetCalls.at(-1)?.value, undefined);
+		await h.runWorkers("99");
 		const callsAfterHide = h.widgetCalls.length;
 		h.emit("tool_execution_start", {
 			toolCallId: "suppressed",
@@ -861,17 +1058,22 @@ describe("worker-board extension: live events, /workers command, and TUI renderi
 		assert.equal(settledLines[1], "No subagent calls on this branch.");
 		assert.equal(settledLines[2], "/workers hide: close");
 
-		// session_shutdown hides widget cleanly
+		// session_start hides widget and resets batch/hidden cleanly
+		h.emit("session_start", {});
+		assert.equal(h.widgetCalls.at(-1)?.value, undefined);
+
+		// Re-open then session_shutdown hides widget cleanly
+		await h.runWorkers("");
+		assert.ok(Array.isArray(h.widgetCalls.at(-1)?.value));
 		h.emit("session_shutdown", {});
 		assert.equal(h.widgetCalls.at(-1)?.value, undefined);
 	});
 
 	it("enforces non-UI safety for /workers command and events", async () => {
 		const h = createBoardHarness({ hasUI: false });
-		await assert.rejects(
-			() => h.runWorkers(""),
-			{ message: "/workers requires an interactive Pi or RPC UI." },
-		);
+		await assert.rejects(() => h.runWorkers(""), {
+			message: "/workers requires an interactive Pi or RPC UI.",
+		});
 		h.emit("tool_execution_start", {
 			toolCallId: "sub-no-ui",
 			toolName: "subagent",
@@ -884,7 +1086,8 @@ describe("worker-board extension: live events, /workers command, and TUI renderi
 	});
 
 	it("renders TUI widget within width constraints and caps each entry to two lines with ellipsis", async () => {
-		const longTask = "Refactor authentication pipeline across all microservices and update every integration fixture cleanly";
+		const longTask =
+			"Refactor authentication pipeline across all microservices and update every integration fixture cleanly";
 		const branch: SessionEntry[] = [
 			makeAssistantEntry("a1", [
 				{
@@ -923,7 +1126,10 @@ describe("worker-board extension: live events, /workers command, and TUI renderi
 			const rendered = component.render(width);
 			assert.ok(rendered.length > 0);
 			// 3 logical lines (header, 1 worker row, footer) => at most 6 screen lines
-			assert.ok(rendered.length <= 6, `width=${width} produced ${rendered.length} lines`);
+			assert.ok(
+				rendered.length <= 6,
+				`width=${width} produced ${rendered.length} lines`,
+			);
 			for (const line of rendered) {
 				const visible = stripVTControlCharacters(line);
 				assert.ok(

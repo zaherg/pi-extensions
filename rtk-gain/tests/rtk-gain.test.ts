@@ -86,14 +86,20 @@ async function flushMicrotasks(): Promise<void> {
 }
 
 function createRtkHarness(execHandler: ExecHandler) {
-	const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>();
+	const handlers = new Map<
+		string,
+		Array<(event: unknown, ctx: ExtensionContext) => unknown>
+	>();
 	let commandHandler:
 		| ((args: string, ctx: ExtensionCommandContext) => Promise<void>)
 		| undefined;
 	const execCalls: ExecCall[] = [];
 
 	const api = {
-		on(event: string, fn: (event: unknown, ctx: ExtensionContext) => unknown): () => void {
+		on(
+			event: string,
+			fn: (event: unknown, ctx: ExtensionContext) => unknown,
+		): () => void {
 			const list = handlers.get(event) ?? [];
 			list.push(fn);
 			handlers.set(event, list);
@@ -101,11 +107,17 @@ function createRtkHarness(execHandler: ExecHandler) {
 		},
 		registerCommand(
 			name: string,
-			config: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> },
+			config: {
+				handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+			},
 		): void {
 			if (name === "rtk-gain") commandHandler = config.handler;
 		},
-		async exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult> {
+		async exec(
+			command: string,
+			args: string[],
+			options?: ExecOptions,
+		): Promise<ExecResult> {
 			execCalls.push({
 				command,
 				args: [...args],
@@ -123,9 +135,14 @@ function createRtkHarness(execHandler: ExecHandler) {
 
 	const statuses: StatusRecord[] = [];
 	const notifications: NotifyRecord[] = [];
-	let onSetStatus: ((key: string, value: string | undefined) => void) | undefined;
+	let onSetStatus:
+		| ((key: string, value: string | undefined) => void)
+		| undefined;
 
-	const makeContext = (opts?: { hasUI?: boolean; cwd?: string }): ExtensionContext =>
+	const makeContext = (opts?: {
+		hasUI?: boolean;
+		cwd?: string;
+	}): ExtensionContext =>
 		({
 			hasUI: opts?.hasUI ?? true,
 			cwd: opts?.cwd ?? "/workspace",
@@ -144,12 +161,18 @@ function createRtkHarness(execHandler: ExecHandler) {
 		execCalls,
 		statuses,
 		notifications,
-		setOnSetStatus(fn: ((key: string, value: string | undefined) => void) | undefined): void {
+		setOnSetStatus(
+			fn: ((key: string, value: string | undefined) => void) | undefined,
+		): void {
 			onSetStatus = fn;
 		},
 		makeContext,
 		async emit(
-			eventName: "session_start" | "turn_end" | "agent_settled" | "session_shutdown",
+			eventName:
+				| "session_start"
+				| "turn_end"
+				| "agent_settled"
+				| "session_shutdown",
 			event: unknown,
 			ctx?: ExtensionContext,
 		): Promise<void> {
@@ -160,7 +183,8 @@ function createRtkHarness(execHandler: ExecHandler) {
 		},
 		async runCommand(args = "", ctx?: ExtensionContext): Promise<void> {
 			assert.ok(commandHandler);
-			const context = (ctx ?? makeContext()) as unknown as ExtensionCommandContext;
+			const context = (ctx ??
+				makeContext()) as unknown as ExtensionCommandContext;
 			await commandHandler(args, context);
 		},
 	};
@@ -173,16 +197,31 @@ describe("rtk-gain: happy paths", () => {
 			callCount++;
 			if (callCount === 1) {
 				return okExec(
-					gainJson({ total_commands: 10, total_input: 2500, total_output: 1000, total_saved: 1500 }),
+					gainJson({
+						total_commands: 10,
+						total_input: 2500,
+						total_output: 1000,
+						total_saved: 1500,
+					}),
 				);
 			}
 			if (callCount === 2) {
 				return okExec(
-					gainJson({ total_commands: 1, total_input: 2, total_output: 1, total_saved: 1 }),
+					gainJson({
+						total_commands: 1,
+						total_input: 2,
+						total_output: 1,
+						total_saved: 1,
+					}),
 				);
 			}
 			return okExec(
-				gainJson({ total_commands: 0, total_input: 0, total_output: 0, total_saved: 0 }),
+				gainJson({
+					total_commands: 0,
+					total_input: 0,
+					total_output: 0,
+					total_saved: 0,
+				}),
 			);
 		});
 
@@ -252,7 +291,12 @@ describe("rtk-gain: happy paths", () => {
 		const h = createRtkHarness(async (command, args) => {
 			if (command.endsWith("rtk")) {
 				return okExec(
-					gainJson({ total_commands: 10, total_input: 1000, total_output: 400, total_saved: 600 }),
+					gainJson({
+						total_commands: 10,
+						total_input: 1000,
+						total_output: 400,
+						total_saved: 600,
+					}),
 				);
 			}
 			if (args[1] === "ls") {
@@ -266,7 +310,12 @@ describe("rtk-gain: happy paths", () => {
 			}
 			if (args[1] === "exec" && args[3] === "box-a") {
 				return okExec(
-					gainJson({ total_commands: 5, total_input: 500, total_output: 100, total_saved: 400 }),
+					gainJson({
+						total_commands: 5,
+						total_input: 500,
+						total_output: 100,
+						total_saved: 400,
+					}),
 				);
 			}
 			throw new Error(`unexpected exec: ${command} ${args.join(" ")}`);
@@ -282,7 +331,9 @@ describe("rtk-gain: happy paths", () => {
 		assert.equal(h.notifications.length, 1);
 		assert.equal(h.notifications[0]?.level, "warning");
 		const text = h.notifications[0]?.message ?? "";
-		assert.ok(text.startsWith("Total (reported only): 1,000 tokens saved (66.7%)"));
+		assert.ok(
+			text.startsWith("Total (reported only): 1,000 tokens saved (66.7%)"),
+		);
 		assert.ok(text.includes("15 commands | 1,500 tokens before / 500 after"));
 		assert.ok(text.includes("Local: 600 tokens saved (60.0%)"));
 		assert.ok(text.includes("Sandbox box-a: 400 tokens saved (80.0%)"));
@@ -290,24 +341,105 @@ describe("rtk-gain: happy paths", () => {
 		assert.ok(text.includes("Sandbox box-c: excluded (not running)"));
 	});
 
+	it("/rtk-gain all caps concurrent sbx exec calls at 8 and preserves sandbox row order", async () => {
+		let inFlight = 0;
+		let peakInFlight = 0;
+		const gates = new Map<string, Deferred<ExecResult>>();
+		const names = Array.from(
+			{ length: 12 },
+			(_, i) => `box-${String(i + 1).padStart(2, "0")}`,
+		);
+		for (const name of names) gates.set(name, deferred<ExecResult>());
+
+		const h = createRtkHarness(async (command, args) => {
+			if (command.endsWith("rtk")) {
+				return okExec(
+					gainJson({
+						total_commands: 1,
+						total_input: 100,
+						total_output: 50,
+						total_saved: 50,
+					}),
+				);
+			}
+			if (args[1] === "ls") {
+				return okExec(
+					JSON.stringify(names.map((name) => ({ name, status: "running" }))),
+				);
+			}
+			const boxName = args[3] ?? "";
+			inFlight++;
+			if (inFlight > peakInFlight) peakInFlight = inFlight;
+			try {
+				return await (gates.get(boxName) as Deferred<ExecResult>).promise;
+			} finally {
+				inFlight--;
+			}
+		});
+
+		const run = h.runCommand("all");
+		await flushMicrotasks();
+		await flushMicrotasks();
+		assert.equal(peakInFlight, 8);
+		assert.equal(inFlight, 8);
+
+		// Resolve in reverse order to prove output preserves input sandbox order
+		for (const [idx, name] of [...names.entries()].reverse()) {
+			gates.get(name)?.resolve(
+				okExec(
+					gainJson({
+						total_commands: 1,
+						total_input: (idx + 1) * 100,
+						total_output: 0,
+						total_saved: (idx + 1) * 100,
+					}),
+				),
+			);
+			await flushMicrotasks();
+			assert.ok(peakInFlight <= 8);
+		}
+		await run;
+
+		const text = h.notifications[0]?.message ?? "";
+		const positions = names.map((name) => text.indexOf(`Sandbox ${name}:`));
+		for (let i = 0; i < positions.length; i++) {
+			assert.ok((positions[i] ?? -1) > 0);
+			if (i > 0) assert.ok((positions[i] ?? 0) > (positions[i - 1] ?? 0));
+		}
+	});
+
 	it("/rtk-gain all reports complete Total (info) when all sandboxes are running and succeed", async () => {
 		const h = createRtkHarness(async (command, args) => {
 			if (command.endsWith("rtk")) {
 				return okExec(
-					gainJson({ total_commands: 2, total_input: 200, total_output: 100, total_saved: 100 }),
+					gainJson({
+						total_commands: 2,
+						total_input: 200,
+						total_output: 100,
+						total_saved: 100,
+					}),
 				);
 			}
 			if (args[1] === "ls") {
-				return okExec(JSON.stringify([{ name: "dev.1-ok", status: "running" }]));
+				return okExec(
+					JSON.stringify([{ name: "dev.1-ok", status: "running" }]),
+				);
 			}
 			return okExec(
-				gainJson({ total_commands: 3, total_input: 300, total_output: 150, total_saved: 150 }),
+				gainJson({
+					total_commands: 3,
+					total_input: 300,
+					total_output: 150,
+					total_saved: 150,
+				}),
 			);
 		});
 
 		await h.runCommand("all");
 		assert.equal(h.notifications[0]?.level, "info");
-		assert.ok(h.notifications[0]?.message.startsWith("Total: 250 tokens saved (50.0%)"));
+		assert.ok(
+			h.notifications[0]?.message.startsWith("Total: 250 tokens saved (50.0%)"),
+		);
 	});
 
 	it("/rtk-gain all handles empty array and null from sbx ls --json", async () => {
@@ -315,7 +447,12 @@ describe("rtk-gain: happy paths", () => {
 			const h = createRtkHarness(async (command) => {
 				if (command.endsWith("rtk")) {
 					return okExec(
-						gainJson({ total_commands: 2, total_input: 100, total_output: 50, total_saved: 50 }),
+						gainJson({
+							total_commands: 2,
+							total_input: 100,
+							total_output: 50,
+							total_saved: 50,
+						}),
 					);
 				}
 				return okExec(sbxPayload);
@@ -336,14 +473,21 @@ describe("rtk-gain: command validation, exec errors, and schema validation", () 
 		const h = createRtkHarness(async () => okExec("{}"));
 		await h.runCommand("bad");
 		assert.equal(h.execCalls.length, 0);
-		assert.deepEqual(h.notifications, [{ message: "Usage: /rtk-gain [all]", level: "error" }]);
+		assert.deepEqual(h.notifications, [
+			{ message: "Usage: /rtk-gain [all]", level: "error" },
+		]);
 	});
 
 	it("handles ENOENT stderr, exec rejection, non-zero exit, killed, truncated, invalid JSON, and invalid schema", async () => {
-		const cases: Array<{ name: string; exec: ExecHandler; expectedReason: string }> = [
+		const cases: Array<{
+			name: string;
+			exec: ExecHandler;
+			expectedReason: string;
+		}> = [
 			{
 				name: "ENOENT stderr",
-				exec: async () => makeExecResult({ stderr: "spawn rtk ENOENT", code: 1 }),
+				exec: async () =>
+					makeExecResult({ stderr: "spawn rtk ENOENT", code: 1 }),
 				expectedReason: "rtk not found",
 			},
 			{
@@ -355,7 +499,8 @@ describe("rtk-gain: command validation, exec errors, and schema validation", () 
 			},
 			{
 				name: "non-zero exit",
-				exec: async () => makeExecResult({ stderr: "permission denied", code: 2 }),
+				exec: async () =>
+					makeExecResult({ stderr: "permission denied", code: 2 }),
 				expectedReason: "rtk exited with code 2",
 			},
 			{
@@ -377,7 +522,12 @@ describe("rtk-gain: command validation, exec errors, and schema validation", () 
 				name: "total_saved > total_input",
 				exec: async () =>
 					okExec(
-						gainJson({ total_commands: 1, total_input: 100, total_output: 0, total_saved: 101 }),
+						gainJson({
+							total_commands: 1,
+							total_input: 100,
+							total_output: 0,
+							total_saved: 101,
+						}),
 					),
 				expectedReason: "rtk returned an unexpected report format",
 			},
@@ -385,7 +535,12 @@ describe("rtk-gain: command validation, exec errors, and schema validation", () 
 				name: "negative counter",
 				exec: async () =>
 					okExec(
-						gainJson({ total_commands: -1, total_input: 100, total_output: 50, total_saved: 50 }),
+						gainJson({
+							total_commands: -1,
+							total_input: 100,
+							total_output: 50,
+							total_saved: 50,
+						}),
 					),
 				expectedReason: "rtk returned an unexpected report format",
 			},
@@ -393,7 +548,12 @@ describe("rtk-gain: command validation, exec errors, and schema validation", () 
 				name: "float counter",
 				exec: async () =>
 					okExec(
-						gainJson({ total_commands: 1.5, total_input: 100, total_output: 50, total_saved: 50 }),
+						gainJson({
+							total_commands: 1.5,
+							total_input: 100,
+							total_output: 50,
+							total_saved: 50,
+						}),
 					),
 				expectedReason: "rtk returned an unexpected report format",
 			},
@@ -428,7 +588,10 @@ describe("rtk-gain: command validation, exec errors, and schema validation", () 
 				`case failed: ${c.name}`,
 			);
 			// Status bar is cleared on error
-			assert.deepEqual(h.statuses.at(-1), { key: "rtk-gain", value: undefined });
+			assert.deepEqual(h.statuses.at(-1), {
+				key: "rtk-gain",
+				value: undefined,
+			});
 		}
 	});
 
@@ -449,7 +612,8 @@ describe("rtk-gain: command validation, exec errors, and schema validation", () 
 			assert.deepEqual(h.notifications, [
 				{
 					level: "error",
-					message: "Local RTK gain unavailable: rtk not found. Check rtk gain --format json.",
+					message:
+						"Local RTK gain unavailable: rtk not found. Check rtk gain --format json.",
 				},
 			]);
 		} finally {
@@ -466,21 +630,33 @@ describe("rtk-gain: command validation, exec errors, and schema validation", () 
 		const h = createRtkHarness(async (command, args) => {
 			if (command.endsWith("rtk")) {
 				return okExec(
-					gainJson({ total_commands: 1, total_input: big, total_output: 0, total_saved: big }),
+					gainJson({
+						total_commands: 1,
+						total_input: big,
+						total_output: 0,
+						total_saved: big,
+					}),
 				);
 			}
 			if (args[1] === "ls") {
 				return okExec(JSON.stringify([{ name: "bigbox", status: "running" }]));
 			}
 			return okExec(
-				gainJson({ total_commands: 1, total_input: 100, total_output: 0, total_saved: 100 }),
+				gainJson({
+					total_commands: 1,
+					total_input: 100,
+					total_output: 0,
+					total_saved: 100,
+				}),
 			);
 		});
 
 		await h.runCommand("all");
 		assert.equal(h.notifications[0]?.level, "warning");
 		const text = h.notifications[0]?.message ?? "";
-		assert.ok(text.startsWith("Total unavailable: counters exceed safe integer range."));
+		assert.ok(
+			text.startsWith("Total unavailable: counters exceed safe integer range."),
+		);
 		assert.ok(text.includes("Local:"));
 		assert.ok(text.includes("Sandbox bigbox:"));
 	});
@@ -491,7 +667,12 @@ describe("rtk-gain: sandbox validation, guest exit codes, and partial failures",
 		const h = createRtkHarness(async (command) => {
 			if (command.endsWith("rtk")) {
 				return okExec(
-					gainJson({ total_commands: 1, total_input: 100, total_output: 50, total_saved: 50 }),
+					gainJson({
+						total_commands: 1,
+						total_input: 100,
+						total_output: 50,
+						total_saved: 50,
+					}),
 				);
 			}
 			return makeExecResult({ stderr: "spawn sbx ENOENT", code: 1 });
@@ -501,7 +682,9 @@ describe("rtk-gain: sandbox validation, guest exit codes, and partial failures",
 		const text = h.notifications[0]?.message ?? "";
 		assert.ok(text.startsWith("Total (reported only):"));
 		assert.ok(
-			text.includes("Sandboxes: excluded (sbx not found; check sbx ls --json on the host)"),
+			text.includes(
+				"Sandboxes: excluded (sbx not found; check sbx ls --json on the host)",
+			),
 		);
 	});
 
@@ -521,7 +704,12 @@ describe("rtk-gain: sandbox validation, guest exit codes, and partial failures",
 			const h = createRtkHarness(async (command) => {
 				if (command.endsWith("rtk")) {
 					return okExec(
-						gainJson({ total_commands: 1, total_input: 100, total_output: 50, total_saved: 50 }),
+						gainJson({
+							total_commands: 1,
+							total_input: 100,
+							total_output: 50,
+							total_saved: 50,
+						}),
 					);
 				}
 				return okExec(payload);
@@ -564,7 +752,9 @@ describe("rtk-gain: sandbox validation, guest exit codes, and partial failures",
 		const text = h.notifications[0]?.message ?? "";
 		assert.ok(text.startsWith("No RTK gains available."));
 		assert.ok(text.includes("Local: excluded (rtk not found)"));
-		assert.ok(text.includes("Sandbox g127: excluded (rtk not found in sandbox)"));
+		assert.ok(
+			text.includes("Sandbox g127: excluded (rtk not found in sandbox)"),
+		);
 		assert.ok(text.includes("Sandbox g125: excluded (sbx could not run rtk)"));
 		assert.ok(text.includes("Sandbox g42: excluded (rtk exited with code 42)"));
 	});
@@ -578,14 +768,21 @@ describe("rtk-gain: sandbox validation, guest exit codes, and partial failures",
 				return okExec(JSON.stringify([{ name: "ok-box", status: "running" }]));
 			}
 			return okExec(
-				gainJson({ total_commands: 4, total_input: 400, total_output: 100, total_saved: 300 }),
+				gainJson({
+					total_commands: 4,
+					total_input: 400,
+					total_output: 100,
+					total_saved: 300,
+				}),
 			);
 		});
 
 		await h.runCommand("all");
 		assert.equal(h.notifications[0]?.level, "warning");
 		const text = h.notifications[0]?.message ?? "";
-		assert.ok(text.startsWith("Total (reported only): 300 tokens saved (75.0%)"));
+		assert.ok(
+			text.startsWith("Total (reported only): 300 tokens saved (75.0%)"),
+		);
 		assert.ok(text.includes("Local: excluded (rtk not found)"));
 		assert.ok(text.includes("Sandbox ok-box: 300 tokens saved (75.0%)"));
 	});
@@ -630,14 +827,28 @@ describe("rtk-gain: coalescing, race guard, lifecycle aborts, and non-UI stderr"
 		assert.equal(h.execCalls.length, 1);
 
 		d1.resolve(
-			okExec(gainJson({ total_commands: 1, total_input: 100, total_output: 50, total_saved: 50 })),
+			okExec(
+				gainJson({
+					total_commands: 1,
+					total_input: 100,
+					total_output: 50,
+					total_saved: 50,
+				}),
+			),
 		);
 		await flushMicrotasks();
 		assert.equal(h.execCalls.length, 2);
 		assert.equal(h.execCalls[1]?.cwd, "/dir-3");
 
 		d2.resolve(
-			okExec(gainJson({ total_commands: 2, total_input: 200, total_output: 50, total_saved: 150 })),
+			okExec(
+				gainJson({
+					total_commands: 2,
+					total_input: 200,
+					total_output: 50,
+					total_saved: 150,
+				}),
+			),
 		);
 		await flushMicrotasks();
 		assert.equal(h.execCalls.length, 2);
@@ -671,7 +882,14 @@ describe("rtk-gain: coalescing, race guard, lifecycle aborts, and non-UI stderr"
 		await h.emit("session_start", {}, ctx);
 		assert.equal(h.execCalls.length, 1);
 		d1.resolve(
-			okExec(gainJson({ total_commands: 1, total_input: 100, total_output: 50, total_saved: 50 })),
+			okExec(
+				gainJson({
+					total_commands: 1,
+					total_input: 100,
+					total_output: 50,
+					total_saved: 50,
+				}),
+			),
 		);
 		await flushMicrotasks();
 		// Re-entrant session_start queued ctx while d1 was pending, so d1's finally started d2
@@ -683,16 +901,58 @@ describe("rtk-gain: coalescing, race guard, lifecycle aborts, and non-UI stderr"
 		assert.equal(h.execCalls.length, 2);
 
 		d2.resolve(
-			okExec(gainJson({ total_commands: 2, total_input: 200, total_output: 100, total_saved: 100 })),
+			okExec(
+				gainJson({
+					total_commands: 2,
+					total_input: 200,
+					total_output: 100,
+					total_saved: 100,
+				}),
+			),
 		);
 		await flushMicrotasks();
 		assert.equal(h.execCalls.length, 3);
 
 		d3.resolve(
-			okExec(gainJson({ total_commands: 3, total_input: 300, total_output: 60, total_saved: 240 })),
+			okExec(
+				gainJson({
+					total_commands: 3,
+					total_input: 300,
+					total_output: 60,
+					total_saved: 240,
+				}),
+			),
 		);
 		await cmdPromise;
 		assert.ok(h.notifications[0]?.message.includes("240 tokens saved (80.0%)"));
+	});
+
+	it("clears stale queued refresh on session_start when replacement session has !hasUI", async () => {
+		const d1 = deferred<ExecResult>();
+		const h = createRtkHarness(() => d1.promise);
+
+		const uiCtx = h.makeContext({ cwd: "/session-1", hasUI: true });
+		const headlessCtx = h.makeContext({ cwd: "/session-2", hasUI: false });
+
+		await h.emit("session_start", {}, uiCtx);
+		await h.emit("turn_end", { toolResults: [{}] }, uiCtx);
+		assert.equal(h.execCalls.length, 1);
+
+		// Replacing session with a headless session must clear the queued session-1 context
+		await h.emit("session_start", {}, headlessCtx);
+		d1.resolve(
+			okExec(
+				gainJson({
+					total_commands: 1,
+					total_input: 100,
+					total_output: 50,
+					total_saved: 50,
+				}),
+			),
+		);
+		await flushMicrotasks();
+		assert.equal(h.execCalls.length, 1);
+		assert.equal(h.statuses.length, 0);
 	});
 
 	it("handles session_shutdown -> session_start lifecycle and prior-signal abort cleanly", async () => {
@@ -717,7 +977,14 @@ describe("rtk-gain: coalescing, race guard, lifecycle aborts, and non-UI stderr"
 
 		// Resolving aborted d1 must NOT overwrite cleared status
 		d1.resolve(
-			okExec(gainJson({ total_commands: 9, total_input: 900, total_output: 100, total_saved: 800 })),
+			okExec(
+				gainJson({
+					total_commands: 9,
+					total_input: 900,
+					total_output: 100,
+					total_saved: 800,
+				}),
+			),
 		);
 		await shutdownPromise;
 		assert.deepEqual(h.statuses.at(-1), { key: "rtk-gain", value: undefined });
@@ -728,7 +995,14 @@ describe("rtk-gain: coalescing, race guard, lifecycle aborts, and non-UI stderr"
 		assert.ok(signal2);
 		assert.equal(signal2.aborted, false);
 		d2.resolve(
-			okExec(gainJson({ total_commands: 2, total_input: 100, total_output: 20, total_saved: 80 })),
+			okExec(
+				gainJson({
+					total_commands: 2,
+					total_input: 100,
+					total_output: 20,
+					total_saved: 80,
+				}),
+			),
 		);
 		await flushMicrotasks();
 		assert.deepEqual(h.statuses.at(-1), {
@@ -746,7 +1020,14 @@ describe("rtk-gain: coalescing, race guard, lifecycle aborts, and non-UI stderr"
 
 		const shutdown = h.emit("session_shutdown", {}, ctx);
 		d1.resolve(
-			okExec(gainJson({ total_commands: 1, total_input: 100, total_output: 50, total_saved: 50 })),
+			okExec(
+				gainJson({
+					total_commands: 1,
+					total_input: 100,
+					total_output: 50,
+					total_saved: 50,
+				}),
+			),
 		);
 		await Promise.all([cmd, shutdown]);
 		assert.equal(h.notifications.length, 0);
@@ -754,7 +1035,14 @@ describe("rtk-gain: coalescing, race guard, lifecycle aborts, and non-UI stderr"
 
 	it("writes command output to process.stderr and skips status refreshes when !ctx.hasUI", async () => {
 		const h = createRtkHarness(async () =>
-			okExec(gainJson({ total_commands: 2, total_input: 100, total_output: 40, total_saved: 60 })),
+			okExec(
+				gainJson({
+					total_commands: 2,
+					total_input: 100,
+					total_output: 40,
+					total_saved: 60,
+				}),
+			),
 		);
 		const noUiCtx = h.makeContext({ hasUI: false });
 
@@ -767,7 +1055,9 @@ describe("rtk-gain: coalescing, race guard, lifecycle aborts, and non-UI stderr"
 		const chunks: string[] = [];
 		const originalWrite = process.stderr.write.bind(process.stderr);
 		process.stderr.write = ((chunk: string | Uint8Array): boolean => {
-			chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+			chunks.push(
+				typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"),
+			);
 			return true;
 		}) as typeof process.stderr.write;
 		try {
@@ -785,27 +1075,67 @@ describe("rtk-gain: coalescing, race guard, lifecycle aborts, and non-UI stderr"
 		assert.equal(chunks[1], "Usage: /rtk-gain [all]\n");
 	});
 
-	it("does not reject when ctx.hasUI getter throws after session disposal mid-refresh", async () => {
+	it("does not reject when ctx getters become stale mid-refresh or while /rtk-gain awaits pending", async () => {
 		const d1 = deferred<ExecResult>();
-		const h = createRtkHarness(() => d1.promise);
+		const d2 = deferred<ExecResult>();
+		let calls = 0;
+		const h = createRtkHarness(() => {
+			calls++;
+			return calls === 1 ? d1.promise : d2.promise;
+		});
 		let stale = false;
-		const baseCtx = h.makeContext({ hasUI: true });
+		const baseCtx = h.makeContext({ hasUI: true, cwd: "/disposed-cwd" });
 		const guardedCtx = new Proxy(baseCtx, {
 			get(target, prop, receiver) {
-				if (stale && (prop === "hasUI" || prop === "ui" || prop === "cwd")) {
-					throw new Error("This extension ctx is stale after session replacement or reload.");
+				if (stale) {
+					throw new Error(
+						"This extension ctx is stale after session replacement or reload.",
+					);
 				}
 				return Reflect.get(target, prop, receiver);
 			},
 		});
 
 		await h.emit("session_start", {}, guardedCtx);
+		const cmdPromise = h.runCommand("", guardedCtx);
 		await flushMicrotasks();
+
+		// Session disposed while /rtk-gain is waiting for d1 in freshLocal
 		stale = true;
-		d1.resolve(
-			okExec(gainJson({ total_commands: 1, total_input: 100, total_output: 40, total_saved: 60 })),
-		);
-		await flushMicrotasks();
-		assert.equal(h.statuses.length, 0);
+		const chunks: string[] = [];
+		const originalWrite = process.stderr.write.bind(process.stderr);
+		process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+			chunks.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			d1.resolve(
+				okExec(
+					gainJson({
+						total_commands: 1,
+						total_input: 100,
+						total_output: 40,
+						total_saved: 60,
+					}),
+				),
+			);
+			await flushMicrotasks();
+			assert.equal(h.execCalls[1]?.cwd, "/disposed-cwd");
+			d2.resolve(
+				okExec(
+					gainJson({
+						total_commands: 2,
+						total_input: 200,
+						total_output: 50,
+						total_saved: 150,
+					}),
+				),
+			);
+			await assert.doesNotReject(cmdPromise);
+			assert.equal(h.statuses.length, 0);
+			assert.ok(chunks[0]?.includes("150 tokens saved"));
+		} finally {
+			process.stderr.write = originalWrite;
+		}
 	});
 });

@@ -86,16 +86,21 @@ export async function invokeRtk(
 		};
 		const stop = (reason: Failure): void => {
 			failure ??= reason;
-			if (!child.pid) return;
-			try {
-				// Kill the entire isolated process group on Unix so spawned helpers terminate.
-				if (grouped) process.kill(-child.pid, "SIGKILL");
-				else child.kill("SIGKILL");
-			} catch (error: unknown) {
-				if (!isRecord(error) || error.code !== "ESRCH") {
-					child.kill("SIGKILL");
+			if (child.pid) {
+				try {
+					// Kill the entire isolated process group on Unix so spawned helpers terminate.
+					if (grouped) process.kill(-child.pid, "SIGKILL");
+					else child.kill("SIGKILL");
+				} catch (error: unknown) {
+					if (!isRecord(error) || error.code !== "ESRCH") {
+						child.kill("SIGKILL");
+					}
 				}
 			}
+			// Destroy stdio streams so escaped grandchildren inheriting pipes cannot block close.
+			child.stdin.destroy();
+			child.stdout.destroy();
+			child.stderr.destroy();
 		};
 		const abort = (): void => stop("aborted");
 		const timer = setTimeout(
@@ -110,7 +115,16 @@ export async function invokeRtk(
 				isRecord(error) && error.code === "ENOENT" ? "unavailable" : "process";
 			finish({ ok: false, reason: failure ?? reason });
 		});
-		child.stdin.on("error", (): void => stop("process"));
+		child.stdin.on("error", (error: NodeJS.ErrnoException): void => {
+			// Ignore early pipe closure so child exit status determines whether an early exit succeeded.
+			if (
+				isRecord(error) &&
+				(error.code === "EPIPE" || error.code === "ERR_STREAM_DESTROYED")
+			) {
+				return;
+			}
+			stop("process");
+		});
 		const collect = (chunk: Buffer, stdout: boolean): void => {
 			size += chunk.length;
 			if (size > maxBytes) stop("output-limit");
@@ -135,7 +149,7 @@ export async function invokeRtk(
 				}
 			}
 		});
-		child.stdin.end(input);
+		if (!failure) child.stdin.end(input);
 	});
 }
 
@@ -202,6 +216,11 @@ export async function filterPosthook(
 	preservesStructure: StructureCheck,
 	verifyRecall = true,
 ): Promise<Result> {
+	const maxBytes = options.maxBytes ?? MAX_BYTES;
+	if (options.signal?.aborted) return { kind: "failed", reason: "aborted" };
+	if (Buffer.byteLength(text) > maxBytes) {
+		return { kind: "failed", reason: "input-limit" };
+	}
 	const response = await invokeRtk(
 		["hook", "claude"],
 		JSON.stringify({
