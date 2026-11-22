@@ -9,6 +9,14 @@ type NotifyLevel = NonNullable<Parameters<ExtensionUIContext["notify"]>[1]>;
 
 export default function wipExtension(pi: ExtensionAPI): void {
 	let running = false;
+	let lifetime = new AbortController();
+
+	pi.on("session_start", (): void => {
+		lifetime = new AbortController();
+	});
+	pi.on("session_shutdown", (): void => {
+		lifetime.abort();
+	});
 
 	pi.registerCommand("wip", {
 		description: 'Run git add . && git commit -m "wip"',
@@ -20,8 +28,13 @@ export default function wipExtension(pi: ExtensionAPI): void {
 				notify("Usage: /wip (no arguments)", "error");
 				return;
 			}
-			if (running) {
-				notify("/wip is already running.", "warning");
+			if (running || !ctx.isIdle()) {
+				notify(
+					running
+						? "/wip is already running."
+						: "Wait for the current operation to finish before running /wip.",
+					"warning",
+				);
 				return;
 			}
 
@@ -32,6 +45,7 @@ export default function wipExtension(pi: ExtensionAPI): void {
 				return;
 			}
 
+			const signal = lifetime.signal;
 			running = true;
 			let command = "git add .";
 			try {
@@ -40,22 +54,29 @@ export default function wipExtension(pi: ExtensionAPI): void {
 					["commit", "-m", "wip"],
 				];
 				for (const gitArgs of commands) {
+					if (signal.aborted) return;
 					command = `git ${gitArgs.join(" ")}`;
-					const result = await pi.exec(git, gitArgs, { cwd: ctx.cwd });
+					const result = await pi.exec(git, gitArgs, {
+						cwd: ctx.cwd,
+						signal,
+						timeout: 30_000,
+						maxBuffer: 1024 * 1024,
+					});
 					if (result.code !== 0 || result.killed) {
+						if (signal.aborted) return;
 						// Report status without forwarding hook output that could contain secrets.
 						notify(
 							result.killed
-								? `${command} was interrupted. Check git status before retrying.`
+								? `${command} was interrupted or timed out. Check git status before retrying.`
 								: `${command} failed (exit code ${result.code}).`,
 							"error",
 						);
 						return;
 					}
 				}
-				notify('Committed with message "wip".', "info");
+				if (!signal.aborted) notify('Committed with message "wip".', "info");
 			} catch {
-				notify(`${command} could not be executed.`, "error");
+				if (!signal.aborted) notify(`${command} could not be executed.`, "error");
 			} finally {
 				running = false;
 			}

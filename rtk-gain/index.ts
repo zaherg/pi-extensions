@@ -105,8 +105,7 @@ function formatAll(rows: [string, Gain | string][], noSandboxes: boolean): [stri
 }
 
 export default function rtkGain(pi: ExtensionAPI): void {
-	const lifetime = new AbortController();
-	const { signal } = lifetime;
+	let lifetime = new AbortController();
 
 	async function query<T>(
 		cwd: string,
@@ -115,6 +114,7 @@ export default function rtkGain(pi: ExtensionAPI): void {
 		parse: (json: unknown) => T | undefined,
 		onExit?: (code: number) => string,
 	): Promise<T | string> {
+		const signal = lifetime.signal;
 		// Resolve bare executables from PATH so Windows never runs binaries from cwd.
 		const executable = resolveExecutable(command);
 		if (!executable) return `${command} not found`;
@@ -143,6 +143,7 @@ export default function rtkGain(pi: ExtensionAPI): void {
 	let queued: ExtensionContext | undefined;
 
 	function readLocal(ctx: ExtensionContext): Promise<Gain | string> {
+		const signal = lifetime.signal;
 		const { cwd } = ctx;
 		const next = query(cwd, "rtk", gainArgs, summary).then((gain: Gain | string): Gain | string => {
 			try {
@@ -150,10 +151,10 @@ export default function rtkGain(pi: ExtensionAPI): void {
 					ctx.ui.setStatus("rtk-gain", typeof gain === "string" ? undefined : `RTK: ${savings(gain, compact)}`);
 				}
 			} finally {
-				pending = undefined;
+				if (pending === next) pending = undefined;
 				const follow = queued;
 				queued = undefined;
-				if (follow && !signal.aborted) void readLocal(follow);
+				if (follow && !lifetime.signal.aborted) void readLocal(follow);
 			}
 			return gain;
 		});
@@ -162,19 +163,24 @@ export default function rtkGain(pi: ExtensionAPI): void {
 	}
 
 	function refresh(ctx: ExtensionContext): void {
+		const signal = lifetime.signal;
 		if (signal.aborted || !ctx.hasUI) return;
 		if (pending) queued = ctx;
 		else void readLocal(ctx);
 	}
 
 	async function freshLocal(ctx: ExtensionContext): Promise<Gain | string> {
+		const signal = lifetime.signal;
 		// Wait for any in-flight background read so commands never return stale data.
 		queued = undefined;
 		while (pending) await pending;
 		return signal.aborted ? "rtk was interrupted or timed out" : readLocal(ctx);
 	}
 
-	pi.on("session_start", (_event: SessionStartEvent, ctx: ExtensionContext): void => refresh(ctx));
+	pi.on("session_start", (_event: SessionStartEvent, ctx: ExtensionContext): void => {
+		lifetime = new AbortController();
+		refresh(ctx);
+	});
 	pi.on("turn_end", (event: TurnEndEvent, ctx: ExtensionContext): undefined => {
 		if (event.toolResults.length > 0) refresh(ctx);
 		return undefined;
@@ -190,6 +196,7 @@ export default function rtkGain(pi: ExtensionAPI): void {
 	pi.registerCommand("rtk-gain", {
 		description: "Show RTK token savings here, or across the host and running Docker sandboxes: /rtk-gain [all]",
 		handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
+			const signal = lifetime.signal;
 			const { cwd } = ctx;
 			const show = (text: string, level: NotifyLevel): void => {
 				if (signal.aborted) return;

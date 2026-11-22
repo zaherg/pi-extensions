@@ -51,6 +51,11 @@ export default function gitExtension(pi: ExtensionAPI): void {
 				return;
 			}
 
+			const captureArgs = terminalCaptureArgs(
+				process.env.SHELL || "/bin/sh",
+				gitShellCommand(args),
+			);
+
 			running = true;
 			// Prevent Ctrl+C from terminating Pi during terminal handoff.
 			const ignoreSigint = (): void => {};
@@ -70,10 +75,7 @@ export default function gitExtension(pi: ExtensionAPI): void {
 							// Pass cwd outside the shell string so path metacharacters are not interpreted.
 							result = spawnSync(
 								"/bin/bash",
-								terminalCaptureArgs(
-									process.env.SHELL || "/bin/sh",
-									gitShellCommand(args),
-								),
+								captureArgs,
 								{
 									cwd: ctx.cwd,
 									stdio: ["inherit", "pipe", "inherit"],

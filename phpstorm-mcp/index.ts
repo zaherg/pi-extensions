@@ -1,4 +1,5 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type {
@@ -49,7 +50,7 @@ function defaultConfig(home: string): McpServerConfig {
 	};
 }
 
-function loadOrCreateConfig(configPath: string, home: string): McpServerConfig {
+export function loadOrCreateConfig(configPath: string, home: string): McpServerConfig {
 	try {
 		return readConfig(configPath);
 	} catch (cause: unknown) {
@@ -59,11 +60,20 @@ function loadOrCreateConfig(configPath: string, home: string): McpServerConfig {
 	}
 
 	const config = defaultConfig(home);
+	const dir = dirname(configPath);
 	try {
-		mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
-		// Use wx to avoid clobbering concurrent writes or following dangling symlinks.
-		writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, { flag: "wx", mode: 0o600 });
-		return config;
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		const tempPath = join(dir, `.pi-phpstorm-mcp.${process.pid}.${randomUUID()}.tmp`);
+		writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+		try {
+			// Publish atomically via hard link to avoid clobbering concurrent writes or following symlinks.
+			linkSync(tempPath, configPath);
+			return config;
+		} finally {
+			try {
+				unlinkSync(tempPath);
+			} catch {}
+		}
 	} catch (cause: unknown) {
 		if (isErrno(cause, "EEXIST")) {
 			try {
