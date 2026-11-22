@@ -11,13 +11,19 @@ import { createServer } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, it } from "node:test";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	type ExtensionContext,
 	type ExtensionError,
+	type RegisteredCommand,
 	SessionManager,
 	SettingsManager,
+	type ToolDefinition,
 	wrapRegisteredTool,
 } from "@earendil-works/pi-coding-agent";
 import { filterPosthook } from "../rtk-pi-extended/bridge.ts";
@@ -603,6 +609,257 @@ describe("Pi 1.6 real harness integration", () => {
 			await new Promise<void>((resolveClose) =>
 				server.close(() => resolveClose()),
 			);
+		}
+	});
+
+	it("enforces stale-entry, mid-flight-disposal, and headless stderr contracts across all 9 extensions", async () => {
+		const tmp = mkdtempSync(join(tmpdir(), "pi-ctx-contract-"));
+		tempDirs.push(tmp);
+		const prevHome = process.env.HOME;
+		process.env.HOME = tmp;
+
+		type CommandDef = Omit<RegisteredCommand, "name" | "sourceInfo">;
+		type EventHandler = (event: unknown, ctx: ExtensionContext) => unknown;
+
+		const staleError = (): never => {
+			throw new Error(
+				"This extension ctx is stale after session replacement or reload",
+			);
+		};
+		const staleCtx = new Proxy({} as ExtensionCommandContext, {
+			get() {
+				return staleError();
+			},
+		});
+
+		const stderrChunks: string[] = [];
+		const origStderrWrite = process.stderr.write.bind(process.stderr);
+		const origConsoleError = console.error;
+		process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+			stderrChunks.push(
+				typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"),
+			);
+			return true;
+		}) as typeof process.stderr.write;
+		console.error = (...args: unknown[]): void => {
+			stderrChunks.push(`${args.map(String).join(" ")}\n`);
+		};
+
+		try {
+			const factories = await Promise.all(
+				ALL_EXTENSION_PATHS.map(async (extPath) => {
+					const mod = (await import(pathToFileURL(extPath).href)) as {
+						default: (pi: ExtensionAPI) => void;
+					};
+					return { path: extPath, init: mod.default };
+				}),
+			);
+
+			let execDelay: Promise<void> | undefined;
+			const registerAll = () => {
+				const commands = new Map<string, CommandDef>();
+				const tools = new Map<string, ToolDefinition>();
+				const events = new Map<string, EventHandler[]>();
+				const host = {
+					registerCommand(name: string, def: CommandDef): void {
+						commands.set(name, def);
+					},
+					registerTool(def: ToolDefinition): void {
+						tools.set(def.name, def);
+					},
+					on(event: string, handler: EventHandler): () => void {
+						const list = events.get(event) ?? [];
+						list.push(handler);
+						events.set(event, list);
+						return () => {};
+					},
+					registerEntryRenderer(): void {},
+					registerMcpServer(): void {},
+					appendEntry(): void {},
+					getSettings() {
+						return {};
+					},
+					async exec() {
+						if (execDelay) await execDelay;
+						return {
+							code: 0,
+							stdout: JSON.stringify({
+								summary: {
+									total_commands: 1,
+									total_input: 200,
+									total_output: 100,
+									total_saved: 100,
+								},
+							}),
+							stderr: "",
+							killed: false,
+							truncated: false,
+						};
+					},
+				} as unknown as ExtensionAPI;
+				for (const { init } of factories) init(host);
+				return { commands, tools, events };
+			};
+
+			// Case 1: stale-at-entry across all registered commands, tools, and event hooks
+			const staleReg = registerAll();
+			for (const [name, cmd] of staleReg.commands) {
+				await assert.doesNotReject(
+					async () => cmd.handler("", staleCtx),
+					`command /${name} threw on stale-at-entry context`,
+				);
+			}
+			const sampleEvents: Record<string, unknown> = {
+				session_start: { type: "session_start", reason: "new" },
+				session_shutdown: { type: "session_shutdown", reason: "new" },
+				session_tree: { type: "session_tree" },
+				session_compact: { type: "session_compact" },
+				input: { type: "input", text: "hi" },
+				before_agent_start: {
+					type: "before_agent_start",
+					messageType: "user",
+					prompt: "hi",
+				},
+				turn_start: { type: "turn_start" },
+				turn_end: {
+					type: "turn_end",
+					turnIndex: 0,
+					toolResults: [{}],
+					toolResultEntryIds: [],
+					outcome: "completed",
+				},
+				agent_end: { type: "agent_end" },
+				agent_settled: { type: "agent_settled", aborted: false },
+				tool_execution_start: {
+					type: "tool_execution_start",
+					toolCallId: "t1",
+					toolName: "subagent",
+					args: { task: "x" },
+				},
+				tool_execution_update: {
+					type: "tool_execution_update",
+					toolCallId: "t1",
+					toolName: "subagent",
+					partialResult: {},
+				},
+				tool_execution_end: {
+					type: "tool_execution_end",
+					toolCallId: "t1",
+					toolName: "subagent",
+					result: {},
+					isError: false,
+				},
+				tool_result: {
+					type: "tool_result",
+					toolCallId: "r1",
+					toolName: "bash",
+					input: { command: "echo ok" },
+					content: [{ type: "text", text: "ok" }],
+					isError: false,
+				},
+			};
+			for (const [eventName, handlers] of staleReg.events) {
+				const payload = sampleEvents[eventName] ?? { type: eventName };
+				for (const handler of handlers) {
+					const result = await handler(payload, staleCtx);
+					if (eventName === "before_agent_start") {
+						assert.equal(
+							result,
+							undefined,
+							"before_agent_start must not inject bogus IO_ERROR on stale context",
+						);
+					}
+				}
+			}
+			for (const [toolName, tool] of staleReg.tools) {
+				await assert.rejects(
+					async () =>
+						tool.execute(
+							"call-1",
+							{ action: "read" },
+							undefined,
+							undefined,
+							staleCtx as unknown as Parameters<typeof tool.execute>[4],
+						),
+					(err: unknown) => err instanceof Error && err.name === "AbortError",
+					`tool ${toolName} must reject with AbortError (not IO_ERROR or raw stale error) on stale context`,
+				);
+			}
+			assert.deepEqual(
+				stderrChunks,
+				[],
+				"stale-at-entry must write nothing to stderr",
+			);
+
+			// Case 2: mid-flight disposal on an interactive (hasUI: true) session never leaks to stderr
+			const midReg = registerAll();
+			let disposed = false;
+			const sessionDir = join(tmp, "sessions");
+			const liveBase = {
+				cwd: tmp,
+				hasUI: true,
+				mode: "tui",
+				signal: undefined,
+				isIdle: () => true,
+				shutdown: () => {},
+				ui: {
+					notify(): void {
+						if (disposed) staleError();
+					},
+					setStatus(): void {
+						if (disposed) staleError();
+					},
+					setWidget(): void {
+						if (disposed) staleError();
+					},
+				},
+				sessionManager: {
+					getSessionId: () => "s1",
+					getSessionDir: () => sessionDir,
+					getLeafId: () => null,
+					getBranch: () => [],
+					buildSessionProjection: () => ({ entries: [], messages: [] }),
+				},
+			};
+			const midCtx = new Proxy(liveBase as unknown as ExtensionCommandContext, {
+				get(target, prop, receiver) {
+					if (disposed) return staleError();
+					return Reflect.get(target, prop, receiver);
+				},
+			});
+			let releaseExec!: () => void;
+			execDelay = new Promise<void>((r) => {
+				releaseExec = r;
+			});
+			const inflightGain = midReg.commands.get("rtk-gain")?.handler("", midCtx);
+			disposed = true;
+			releaseExec();
+			await inflightGain;
+			execDelay = undefined;
+			assert.deepEqual(
+				stderrChunks,
+				[],
+				"disposed interactive session must never dump UI notifications onto stderr",
+			);
+
+			// Case 3: active headless (hasUI: false) session routes command diagnostics to stderr
+			const headlessReg = registerAll();
+			const headlessCtx = {
+				...liveBase,
+				hasUI: false,
+				mode: "json",
+			} as unknown as ExtensionCommandContext;
+			await headlessReg.commands.get("rtk-gain")?.handler("invalid", headlessCtx);
+			await headlessReg.commands
+				.get("rtk-coverage")
+				?.handler("invalid", headlessCtx);
+			await headlessReg.commands.get("progress")?.handler("invalid", headlessCtx);
+			assert.equal(stderrChunks.length, 3);
+		} finally {
+			process.stderr.write = origStderrWrite;
+			console.error = origConsoleError;
+			if (prevHome === undefined) delete process.env.HOME;
+			else process.env.HOME = prevHome;
 		}
 	});
 });

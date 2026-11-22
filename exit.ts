@@ -1,13 +1,12 @@
-import type {
-	ExtensionAPI,
-	ExtensionCommandContext,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { bindSession, type SessionSnapshot } from "./shared/session.ts";
 
 export default function exitExtension(pi: ExtensionAPI): void {
-	pi.registerCommand("exit", {
+	const session = bindSession(pi);
+	session.registerCommand("exit", {
 		description: "Quit Pi",
-		handler: async (_args: string, ctx: ExtensionCommandContext): Promise<void> => {
-			ctx.shutdown();
+		handler: async (_args: string, snap: SessionSnapshot): Promise<void> => {
+			snap.shutdown();
 		},
 	});
 }

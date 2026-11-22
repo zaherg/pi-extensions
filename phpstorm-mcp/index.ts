@@ -11,10 +11,10 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type {
 	ExtensionAPI,
-	ExtensionContext,
 	McpServerConfig,
 	SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
+import { bindSession, type SessionSnapshot } from "../shared/session.ts";
 import { isPhpStormRunning } from "./running.ts";
 
 function isErrno(error: unknown, code: string): boolean {
@@ -156,7 +156,6 @@ function loadOrCreateConfig(configPath: string, home: string): McpServerConfig {
 				flag: "wx",
 				mode: 0o600,
 			});
-			// Publish atomically via hard link to avoid clobbering concurrent writes or following symlinks.
 			linkSync(tempPath, configPath);
 			return config;
 		} finally {
@@ -183,26 +182,16 @@ function loadOrCreateConfig(configPath: string, home: string): McpServerConfig {
 }
 
 export default function phpstormMcp(pi: ExtensionAPI): void {
-	let lifetime = new AbortController();
+	const session = bindSession(pi);
 
-	pi.on("session_shutdown", (): void => {
-		lifetime.abort();
-	});
-
-	pi.on(
+	session.onLifecycle(
 		"session_start",
-		async (_event: SessionStartEvent, ctx: ExtensionContext): Promise<void> => {
-			lifetime.abort();
-			lifetime = new AbortController();
-			const { signal } = lifetime;
-
-			let mode: ExtensionContext["mode"];
-			try {
-				mode = ctx.mode;
-			} catch {
-				return;
-			}
-			if (mode !== "rpc" || isMcpDisabled()) return;
+		async (
+			_event: SessionStartEvent,
+			snap: SessionSnapshot | undefined,
+		): Promise<void> => {
+			if (snap?.mode !== "rpc" || isMcpDisabled()) return;
+			const { sessionSignal: signal } = snap;
 			if (!(await isPhpStormRunning(pi, process.platform, process.env, signal)))
 				return;
 			if (signal.aborted) return;
@@ -212,17 +201,7 @@ export default function phpstormMcp(pi: ExtensionAPI): void {
 			const config = loadOrCreateConfig(configPath, home);
 			if (signal.aborted) return;
 
-			try {
-				pi.registerMcpServer("phpstorm", config);
-			} catch (error: unknown) {
-				if (
-					signal.aborted ||
-					(error instanceof Error && /stale after session/i.test(error.message))
-				) {
-					return;
-				}
-				throw error;
-			}
+			session.registerMcpServer("phpstorm", config);
 		},
 	);
 }

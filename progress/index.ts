@@ -6,9 +6,6 @@ import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
 	ExtensionAPI,
-	ExtensionCommandContext,
-	ExtensionContext,
-	ExtensionToolContext,
 	SessionShutdownEvent,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -17,6 +14,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { redactSecrets, stripUnsafeText } from "../shared/display.ts";
+import { bindSession, type SessionSnapshot } from "../shared/session.ts";
 import { createProgressUpdater } from "./background.ts";
 import type { ProgressDocument, ProgressResult, Step, Task } from "./store.ts";
 import {
@@ -82,29 +80,30 @@ function failure(error: unknown): string {
 }
 
 export default function progressExtension(pi: ExtensionAPI): void {
+	const session = bindSession(pi);
 	const updater = createProgressUpdater(pi, withFileMutationQueue);
 	// Invalidate on input because pre-prompt compaction runs before before_agent_start.
-	pi.on("input", () => {
+	session.onLifecycle("input", () => {
 		updater.invalidate();
 		return undefined;
 	});
-	pi.on("session_start", () => updater.start());
-	pi.on(
+	session.onLifecycle("session_start", () => updater.start());
+	session.onLifecycle(
 		"session_shutdown",
 		async (event: SessionShutdownEvent): Promise<void> => {
 			if (event.reason === "quit") await updater.finishBeforeExit();
 			else updater.shutdown();
 		},
 	);
-	pi.on("session_tree", () => updater.invalidate());
-	pi.on(
+	session.onLifecycle("session_tree", () => updater.invalidate());
+	session.on(
 		"agent_settled",
-		(event: AgentSettledEvent, ctx: ExtensionContext): void => {
-			if (!event.aborted) updater.schedule(ctx);
+		(event: AgentSettledEvent, snap: SessionSnapshot): void => {
+			if (!event.aborted) updater.schedule(snap.rawContext);
 		},
 	);
 
-	pi.registerTool<typeof ProgressToolParameters, ProgressResult>({
+	session.registerTool<typeof ProgressToolParameters, ProgressResult>({
 		name: "progress",
 		label: "Progress",
 		description:
@@ -128,16 +127,15 @@ export default function progressExtension(pi: ExtensionAPI): void {
 			params: ProgressToolInput,
 			signal: AbortSignal | undefined,
 			_onUpdate: AgentToolUpdateCallback<ProgressResult> | undefined,
-			ctx: ExtensionToolContext,
+			snap: SessionSnapshot,
 		): Promise<AgentToolResult<ProgressResult>> {
+			const { cwd } = snap;
 			try {
-				// Disallow opting a directory into tracking from the model-facing tool.
 				if (!ACTIONS.some((action) => action === params.action))
 					throw new ProgressError(
 						"INVALID_REQUEST",
 						"Use /progress start to enable tracking.",
 					);
-				const { cwd } = ctx;
 				const sanitized = sanitizeProgressInput(params);
 				const result = await withFileMutationQueue(
 					await progressPath(cwd),
@@ -160,24 +158,11 @@ export default function progressExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerCommand("progress", {
+	session.registerCommand("progress", {
 		description:
 			"Show tracking status, or /progress start to enable this directory",
-		handler: async (
-			args: string,
-			ctx: ExtensionCommandContext,
-		): Promise<void> => {
-			const notify = (message: string, level: "info" | "error"): void => {
-				try {
-					if (ctx.hasUI) {
-						ctx.ui.notify(message, level);
-						return;
-					}
-				} catch {
-					// Fall back when ExtensionCommandContext getters become stale mid-flight.
-				}
-				if (level === "error") process.stderr.write(`${message}\n`);
-			};
+		handler: async (args: string, snap: SessionSnapshot): Promise<void> => {
+			const { cwd } = snap;
 			try {
 				const action = args.trim();
 				if (action !== "" && action !== "start")
@@ -185,7 +170,6 @@ export default function progressExtension(pi: ExtensionAPI): void {
 						"INVALID_REQUEST",
 						"Usage: /progress [start]",
 					);
-				const { cwd } = ctx;
 				const result = await withFileMutationQueue(
 					await progressPath(cwd),
 					() =>
@@ -193,27 +177,28 @@ export default function progressExtension(pi: ExtensionAPI): void {
 							action: action === "start" ? "start" : "read",
 						}),
 				);
-				notify(
+				snap.notify(
 					result.document
 						? `${result.path}\n${summary(result.document)}`
 						: `Tracking is off. Run /progress start to enable it at ${result.path}.`,
 					"info",
+					{ stderr: "errors" },
 				);
 			} catch (error: unknown) {
-				notify(failure(error), "error");
+				snap.notify(failure(error), "error", { stderr: "errors" });
 			}
 		},
 	});
 
-	pi.on(
+	session.on(
 		"before_agent_start",
 		async (
 			_event: BeforeAgentStartEvent,
-			ctx: ExtensionContext,
+			snap: SessionSnapshot,
 		): Promise<BeforeAgentStartEventResult | undefined> => {
 			updater.invalidate();
+			const { cwd } = snap;
 			try {
-				const { cwd } = ctx;
 				const result = await runProgress(cwd, { action: "read" });
 				if (!result.document) return undefined;
 				return {

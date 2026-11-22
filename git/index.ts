@@ -4,11 +4,11 @@ import type {
 	CustomEntry,
 	EntryRenderOptions,
 	ExtensionAPI,
-	ExtensionCommandContext,
 	KeybindingsManager,
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import { type Component, Text, type TUI } from "@earendil-works/pi-tui";
+import { bindSession, type SessionSnapshot } from "../shared/session.ts";
 import {
 	CAPTURE_BYTES,
 	gitResultMessage,
@@ -17,26 +17,22 @@ import {
 
 export function gitShellCommand(args: string): string {
 	if (!args.trim()) return "git";
-	// Rewrite standalone quoted commit messages into git commit -m.
 	const message =
 		/^[ \t]*commit[ \t]+("(?:[^"\\]|\\[\s\S])*"|'[^']*')[ \t\r\n]*$/.exec(args);
 	return message ? `git commit -m ${message[1]}` : `git ${args}`;
 }
 
 export default function gitExtension(pi: ExtensionAPI): void {
+	const session = bindSession(pi);
 	let activeRun: symbol | undefined;
-	let generation = 0;
 
-	pi.on("session_start", (): void => {
-		generation += 1;
+	session.onLifecycle("session_start", (): void => {
 		activeRun = undefined;
 	});
-	pi.on("session_shutdown", (): void => {
-		generation += 1;
+	session.onLifecycle("session_shutdown", (): void => {
 		activeRun = undefined;
 	});
 
-	// Render custom Git entries in the transcript without sending them to the model.
 	pi.registerEntryRenderer<string>(
 		"git-output",
 		(
@@ -52,50 +48,48 @@ export default function gitExtension(pi: ExtensionAPI): void {
 		},
 	);
 
-	pi.registerCommand("git", {
+	session.registerCommand("git", {
 		description:
 			'Run any Git command with inline results; commit "message" means commit -m "message"',
-		handler: async (
-			args: string,
-			ctx: ExtensionCommandContext,
-		): Promise<void> => {
-			if (ctx.mode !== "tui") {
+		handler: async (args: string, snap: SessionSnapshot): Promise<void> => {
+			if (snap.mode !== "tui") {
 				throw new Error("/git requires Pi's interactive terminal.");
 			}
-			const cwd = ctx.cwd;
-			if (activeRun !== undefined || !ctx.isIdle()) {
-				ctx.ui.notify(
+			const idle = snap.isIdle();
+			if (idle === undefined) return;
+			if (activeRun !== undefined || !idle) {
+				snap.notify(
 					"Wait for the current operation to finish before running /git.",
 					"warning",
 				);
 				return;
 			}
 
+			const { cwd, sessionSignal } = snap;
 			const captureArgs = terminalCaptureArgs(
 				process.env.SHELL || "/bin/sh",
 				gitShellCommand(args),
 			);
 
 			const run = Symbol("git");
-			const runGeneration = generation;
 			activeRun = run;
 			// Prevent Ctrl+C from terminating Pi during terminal handoff.
 			const ignoreSigint = (): void => {};
 			process.on("SIGINT", ignoreSigint);
 			let message: string;
 			try {
-				const result = await ctx.ui.custom<SpawnSyncReturns<Buffer>>(
+				const result = await snap.custom<SpawnSyncReturns<Buffer>>(
 					(
 						tui: TUI,
 						_theme: Theme,
 						_keybindings: KeybindingsManager,
 						done: (result: SpawnSyncReturns<Buffer>) => void,
 					): Component => {
-						let result: SpawnSyncReturns<Buffer>;
+						let spawned: SpawnSyncReturns<Buffer>;
 						tui.stop();
 						try {
 							// Pass cwd outside the shell string so path metacharacters are not interpreted.
-							result = spawnSync("/bin/bash", captureArgs, {
+							spawned = spawnSync("/bin/bash", captureArgs, {
 								cwd,
 								stdio: ["inherit", "pipe", "inherit"],
 								maxBuffer: CAPTURE_BYTES + 1024,
@@ -104,7 +98,7 @@ export default function gitExtension(pi: ExtensionAPI): void {
 							tui.start();
 							tui.requestRender(true);
 						}
-						done(result);
+						done(spawned);
 						return { render: (): string[] => [], invalidate(): void {} };
 					},
 				);
@@ -113,7 +107,6 @@ export default function gitExtension(pi: ExtensionAPI): void {
 					? "Git shell could not be started. Check SHELL and the project directory."
 					: gitResultMessage(result.stdout, result.status, result.signal);
 			} catch {
-				// Avoid copying shell errors that could contain credentials into the transcript.
 				message =
 					"Git terminal execution failed. Check git status before retrying.";
 			} finally {
@@ -124,20 +117,10 @@ export default function gitExtension(pi: ExtensionAPI): void {
 				if (activeRun === run) activeRun = undefined;
 			}
 
-			if (runGeneration !== generation) return;
+			if (sessionSignal.aborted) return;
 
-			try {
-				pi.appendEntry<string>("git-output", message);
-			} catch {
-				// Warn instead of failing after Git has already executed.
-				try {
-					if (ctx.hasUI) {
-						ctx.ui.notify(
-							`Could not save Git's inline result.\n${message}`,
-							"warning",
-						);
-					}
-				} catch {}
+			if (!session.appendEntry<string>("git-output", message)) {
+				snap.notify(`Could not save Git's inline result.\n${message}`, "warning");
 			}
 		},
 	});

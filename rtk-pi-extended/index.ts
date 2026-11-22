@@ -3,15 +3,13 @@ import { fileURLToPath } from "node:url";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
-	ExtensionCommandContext,
-	ExtensionContext,
-	ExtensionUIContext,
 	ToolResultEvent,
 	ToolResultEventResult,
 	TurnEndEvent,
 	TurnEndEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { resolveExecutable } from "../shared/executable.ts";
+import { bindSession, type SessionSnapshot } from "../shared/session.ts";
 import { type Failure, filterPosthook, type Result } from "./bridge.ts";
 import {
 	classifyBash,
@@ -50,25 +48,6 @@ const FAILURE_MESSAGES: Record<Failure, string> = {
 	unexpected: "an unexpected adapter error occurred",
 };
 
-type NotifyLevel = NonNullable<Parameters<ExtensionUIContext["notify"]>[1]>;
-
-function show(
-	ctx: ExtensionContext,
-	message: string,
-	level: NotifyLevel,
-): void {
-	try {
-		if (ctx.hasUI) {
-			ctx.ui.notify(message, level);
-			return;
-		}
-	} catch {
-		// Fall back to stderr when a stale extension context cannot access UI.
-	}
-	// Write diagnostics to stderr so JSON or RPC stdout streams stay clean.
-	process.stderr.write(`${message}\n`);
-}
-
 function textOf(content: readonly (TextContent | ImageContent)[]): string {
 	return content
 		.filter((block): block is TextContent => block.type === "text")
@@ -77,8 +56,8 @@ function textOf(content: readonly (TextContent | ImageContent)[]): string {
 }
 
 export default function rtkPiExtended(pi: ExtensionAPI): void {
+	const session = bindSession(pi);
 	const pipelines = join(dirname(fileURLToPath(import.meta.url)), "rtk");
-	let lifetime = new AbortController();
 	let indexEpoch = 0;
 	let turnEpoch = 0;
 	const pending = new Set<Promise<Processed | undefined>>();
@@ -93,32 +72,27 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 		| { leaf: string | null; results: Map<string, string> }
 		| undefined;
 
-	const warn = (reason: Failure, ctx: ExtensionContext): void => {
+	const warn = (reason: Failure, snap: SessionSnapshot): void => {
 		if (reason === "aborted" || reported.has(reason)) return;
 		reported.add(reason);
-		show(
-			ctx,
+		snap.notify(
 			`[rtk-pi-extended] ${FAILURE_MESSAGES[reason]}; original output retained.`,
 			"warning",
+			{ stderr: true },
 		);
 	};
 
-	/** Return model-visible tool results, rebuilding only when the session leaf moves. */
-	const contextOf = (ctx: ExtensionContext) => (): ContextResults => {
-		try {
-			const leaf = ctx.sessionManager.getLeafId();
-			if (contextCache?.leaf === leaf) return contextCache.results;
-			const results = new Map<string, string>();
-			for (const message of ctx.sessionManager.buildSessionProjection()
-				.messages) {
-				if (message.role === "toolResult")
-					results.set(message.toolCallId, textOf(message.content));
-			}
-			contextCache = { leaf, results };
-			return results;
-		} catch {
-			return new Map();
+	const contextOf = (snap: SessionSnapshot) => (): ContextResults => {
+		const projected = snap.leafProjection();
+		if (!projected) return new Map();
+		if (contextCache?.leaf === projected.leaf) return contextCache.results;
+		const results = new Map<string, string>();
+		for (const message of projected.messages) {
+			if (message.role === "toolResult")
+				results.set(message.toolCallId, textOf(message.content));
 		}
+		contextCache = { leaf: projected.leaf, results };
+		return results;
 	};
 
 	const forget = (): void => {
@@ -127,39 +101,33 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 		passages.clear();
 		contextCache = undefined;
 	};
-	// Recreate lifetime on session_start so non-quit session replacements re-enable filtering.
-	pi.on("session_start", (): void => {
-		lifetime.abort();
-		lifetime = new AbortController();
+	session.onLifecycle("session_start", (): void => {
 		turnEpoch++;
 		recallVerified = false;
 		reported.clear();
 		ledger.clear();
 		forget();
 	});
-	// Clear cached indexes on compaction or branch switches to free memory.
-	pi.on("session_compact", forget);
-	pi.on("session_tree", (): void => {
+	session.onLifecycle("session_compact", forget);
+	session.onLifecycle("session_tree", (): void => {
 		turnEpoch++;
 		ledger.clear();
 		forget();
 	});
 
-	pi.on(
+	session.on(
 		"tool_result",
 		async (
 			event: ToolResultEvent,
-			ctx: ExtensionContext,
+			snap: SessionSnapshot,
 		): Promise<ToolResultEventResult | undefined> => {
-			const sessionSignal = lifetime.signal;
-			const callSignal = ctx.signal;
+			const { cwd, signal, sessionSignal, callSignal } = snap;
 			if (
 				process.env.RTK_DISABLED === "1" ||
 				sessionSignal.aborted ||
 				callSignal?.aborted
 			)
 				return undefined;
-			const { cwd } = ctx;
 			if (
 				(event.toolName === "edit" || event.toolName === "write") &&
 				!event.isError &&
@@ -169,15 +137,12 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 			const route = select(event, cwd);
 			const block = event.content[0];
 			if (!route || block?.type !== "text") return undefined;
-			const signal = callSignal
-				? AbortSignal.any([callSignal, sessionSignal])
-				: sessionSignal;
 			const indexGen = indexEpoch;
 			const turnGen = turnEpoch;
 			const deps: Dependencies = {
 				cwd,
 				gate,
-				context: contextOf(ctx),
+				context: contextOf(snap),
 				reads,
 				passages,
 				canCommit: () => !signal.aborted && indexGen === indexEpoch,
@@ -211,7 +176,7 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 				)
 					return undefined;
 				ledger.record(processed.sample);
-				if (processed.failure) warn(processed.failure, ctx);
+				if (processed.failure) warn(processed.failure, snap);
 				if (processed.text === undefined) return undefined;
 				const updated = processed.text;
 				const content =
@@ -222,7 +187,6 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 									? { ...item, text: updated }
 									: item,
 							);
-				// Preserve block metadata and structuredContent while replacing only model-facing text.
 				return {
 					content,
 					...(event.structuredContent === undefined
@@ -230,8 +194,7 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 						: { structuredContent: event.structuredContent }),
 				};
 			} catch {
-				// Never expose subprocess output or tool content through diagnostics.
-				if (!signal.aborted && turnGen === turnEpoch) warn("unexpected", ctx);
+				if (!signal.aborted && turnGen === turnEpoch) warn("unexpected", snap);
 				return undefined;
 			} finally {
 				pending.delete(work);
@@ -239,23 +202,24 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 		},
 	);
 
-	// Append outcome tallies at turn end without exposing them to the model.
-	pi.on("turn_end", (event: TurnEndEvent): TurnEndEventResult | undefined => {
-		if (lifetime.signal.aborted) {
-			ledger.clear();
-			return undefined;
-		}
-		const data = ledger.drain();
-		if (data === undefined) return undefined;
-		return {
-			entries: [
-				...event.entries,
-				{ type: "custom", customType: ENTRY_TYPE, data },
-			],
-		};
-	});
+	session.onLifecycle(
+		"turn_end",
+		(event: TurnEndEvent): TurnEndEventResult | undefined => {
+			if (session.signal.aborted) {
+				ledger.clear();
+				return undefined;
+			}
+			const data = ledger.drain();
+			if (data === undefined) return undefined;
+			return {
+				entries: [
+					...event.entries,
+					{ type: "custom", customType: ENTRY_TYPE, data },
+				],
+			};
+		},
+	);
 
-	/** Mirror the stock RTK Pi hook's rewrite decision without executing the command. */
 	const rewriter = (
 		rtk: string,
 		signal: AbortSignal,
@@ -283,29 +247,26 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 		};
 	};
 
-	pi.registerCommand("rtk-coverage", {
+	session.registerCommand("rtk-coverage", {
 		description:
 			"Tool-output volume, RTK coverage, and savings from Pi sessions: /rtk-coverage [days] [project|all]",
-		handler: async (
-			args: string,
-			ctx: ExtensionCommandContext,
-		): Promise<void> => {
-			const signal = lifetime.signal;
+		handler: async (args: string, snap: SessionSnapshot): Promise<void> => {
+			const { sessionSignal: signal } = snap;
 			const parsed = parseCoverageArgs(args);
 			if (!parsed.ok) {
-				if (!signal.aborted) show(ctx, parsed.message, "error");
+				snap.notify(parsed.message, "error", { stderr: true });
 				return;
 			}
 			if (signal.aborted) return;
+			const sessionDir = snap.sessionDir();
+			if (!sessionDir) return;
 			const { options } = parsed;
 			const since = windowStart(options.days);
 			try {
-				const sessionDir = ctx.sessionManager.getSessionDir();
 				const files = await sessionFiles(sessionDir, options.scope, since);
 				if (signal.aborted) return;
 				const scan = await scanSessions(files, since);
 				if (signal.aborted) return;
-				// Resolve rtk from PATH once per report, leaving commands unclassified when absent.
 				const rtk = resolveExecutable("rtk");
 				const bash = await classifyBash(
 					scan.bashCommands,
@@ -314,21 +275,22 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 						: async (): Promise<undefined> => undefined,
 				);
 				if (signal.aborted) return;
-				show(ctx, formatReport(options, scan, bash), "info");
+				snap.notify(formatReport(options, scan, bash), "info", {
+					stderr: true,
+				});
 			} catch (error: unknown) {
 				if (signal.aborted) return;
 				const reason = error instanceof Error ? error.message : String(error);
-				show(
-					ctx,
+				snap.notify(
 					`RTK coverage could not read session files: ${reason}`,
 					"error",
+					{ stderr: true },
 				);
 			}
 		},
 	});
 
-	pi.on("session_shutdown", async (): Promise<void> => {
-		lifetime.abort();
+	session.onLifecycle("session_shutdown", async (): Promise<void> => {
 		turnEpoch++;
 		ledger.clear();
 		forget();

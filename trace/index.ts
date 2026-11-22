@@ -1,10 +1,10 @@
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
-	ExtensionCommandContext,
 	SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { displayLabel, displayTail } from "../shared/display.ts";
+import { bindSession, type SessionSnapshot } from "../shared/session.ts";
 
 const PAGE_SIZE = 25;
 const MAX_NESTED = 10;
@@ -162,7 +162,6 @@ function diagnostic(
 	tool?: string,
 	cachedNested?: readonly NestedCall[],
 ): string {
-	// Keep only a bounded text tail without loading referenced files or rendering images.
 	const { content } = msg;
 	let text = "";
 	let cut = false;
@@ -177,7 +176,6 @@ function diagnostic(
 				continue;
 			const space = 16_384 - text.length - (text ? 1 : 0);
 			if (space <= 0) {
-				// Prepend a newline when earlier blocks were dropped so this block stays intact.
 				text = `\n${text}`;
 				cut = true;
 				break;
@@ -218,37 +216,36 @@ function diagnostic(
 }
 
 export default function trace(pi: ExtensionAPI): void {
+	const session = bindSession(pi);
 	let branch = new AbortController();
 	const resetBranch = (): void => {
 		branch.abort();
 		branch = new AbortController();
 	};
-	pi.on("session_start", resetBranch);
-	pi.on("session_tree", resetBranch);
-	pi.on("session_shutdown", (): void => branch.abort());
+	session.onLifecycle("session_start", resetBranch);
+	session.onLifecycle("session_tree", resetBranch);
+	session.onLifecycle("session_shutdown", (): void => branch.abort());
 
-	pi.registerCommand("trace", {
+	session.registerCommand("trace", {
 		description:
 			"Inspect recorded tool results on this branch: /trace [failed] [tool]",
-		handler: async (
-			args: string,
-			ctx: ExtensionCommandContext,
-		): Promise<void> => {
-			if (!ctx.hasUI)
+		handler: async (args: string, snap: SessionSnapshot): Promise<void> => {
+			if (!snap.hasUI)
 				throw new Error("/trace requires an interactive Pi or RPC UI.");
 			const tokens = args.trim() ? args.trim().split(/\s+/u) : [];
 			if (
 				tokens.length > 2 ||
 				(tokens.length === 2 && tokens[0] !== "failed")
 			) {
-				ctx.ui.notify("Usage: /trace [failed] [tool]", "warning");
+				snap.notify("Usage: /trace [failed] [tool]", "warning");
 				return;
 			}
+			const entries = snap.branch();
+			if (!entries) return;
 			const failedOnly = tokens[0] === "failed";
 			const tool = failedOnly ? tokens[1] : tokens[0];
 			const calls = new Map<string, unknown>();
-			const results = ctx.sessionManager
-				.getBranch()
+			const results = entries
 				.flatMap((entry: SessionEntry): TraceItem[] => {
 					if (entry.type !== "message") return [];
 					if (
@@ -313,7 +310,7 @@ export default function trace(pi: ExtensionAPI): void {
 				})
 				.reverse();
 			if (!results.length) {
-				ctx.ui.notify("No matching tool results on this branch.", "info");
+				snap.notify("No matching tool results on this branch.", "info");
 				return;
 			}
 			resetBranch();
@@ -339,7 +336,7 @@ export default function trace(pi: ExtensionAPI): void {
 				if (offset + page.length < results.length) options.push(OLDER);
 				let pick: string | undefined;
 				try {
-					pick = await ctx.ui.select(
+					pick = await snap.select(
 						`Tool trace (${offset + 1}-${offset + page.length} of ${results.length})`,
 						options,
 						{ signal },
@@ -353,27 +350,25 @@ export default function trace(pi: ExtensionAPI): void {
 				else {
 					const selected = page[labels.indexOf(pick)];
 					if (!selected) return;
-					try {
-						if (
-							!ctx.sessionManager
-								.getBranch()
-								.some((entry: SessionEntry) => entry.id === selected.id)
-						) {
-							ctx.ui.notify(
-								"The selected result is no longer on this branch.",
-								"warning",
-							);
-							return;
-						}
-						ctx.ui.notify(
-							`${pick}\n${diagnostic(selected.msg, tool, selected.nested)}`,
-							selected.msg.isError || selected.hasFailedNestedCall
-								? "warning"
-								: "info",
+					const currentBranch = snap.branch();
+					if (!currentBranch) return;
+					if (
+						!currentBranch.some(
+							(entry: SessionEntry) => entry.id === selected.id,
+						)
+					) {
+						snap.notify(
+							"The selected result is no longer on this branch.",
+							"warning",
 						);
-					} catch {
 						return;
 					}
+					snap.notify(
+						`${pick}\n${diagnostic(selected.msg, tool, selected.nested)}`,
+						selected.msg.isError || selected.hasFailedNestedCall
+							? "warning"
+							: "info",
+					);
 				}
 			}
 		},

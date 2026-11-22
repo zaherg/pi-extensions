@@ -156,14 +156,12 @@ export function projectConversation(
 			truncated = true;
 			break;
 		}
-		// Bound message length before regex redaction while preserving PEM blocks up to 64 KiB.
 		const maxScan = stripped.includes("PRIVATE KEY") ? 65_536 : 16_384;
 		let bounded = stripped;
 		if (stripped.length > maxScan) {
 			truncated = true;
 			bounded = stripped.slice(0, maxScan).replace(/\S+$/u, "");
 		}
-		// Redact common credential patterns before sending transcript excerpts.
 		const text = redactSecrets(bounded);
 		if (!text.trim()) continue;
 		const limit = Math.min(6000, remaining);
@@ -179,7 +177,6 @@ export function projectConversation(
 	return { messages, truncated, completed };
 }
 function projectedEntries(ctx: ExtensionContext): SessionEntry[] {
-	// Use Pi's session projection so context edits and compaction are respected.
 	const entries: SessionEntry[] = [];
 	for (const {
 		sourceEntry,
@@ -203,23 +200,18 @@ function hasCompletedReply(entries: readonly SessionEntry[]): boolean {
 function conversation(ctx: ExtensionContext): Conversation {
 	return projectConversation(projectedEntries(ctx));
 }
-function warning(ctx: ExtensionContext, error: unknown, exiting = false): void {
+function warning(job: Job, error: unknown, exiting = false): void {
 	const result = errorResult(error);
 	const message = `Progress background update: ${result.code}: ${result.message} ${exiting ? "Exiting without a confirmed progress update." : "The next finished reply can try again."}`;
-	if (!exiting) {
+	if (!exiting && job.hasUI) {
 		try {
-			if (ctx.hasUI) {
-				ctx.ui.notify(message, "warning");
-				return;
-			}
-		} catch {
-			// Context became stale after session replacement or disposal; fall back to stderr.
-		}
+			job.ctx.ui.notify(message, "warning");
+		} catch {}
+		return;
 	}
 	console.error(message);
 }
 
-// Race against AbortSignal so providers ignoring cancellation cannot hold the queue.
 async function cancellable<T>(
 	operation: Promise<T>,
 	signal: AbortSignal,
@@ -239,6 +231,7 @@ async function cancellable<T>(
 
 type Job = {
 	ctx: ExtensionContext;
+	hasUI: boolean;
 	cwd: string;
 	sessionId: string;
 	modelRegistry: ModelRegistry;
@@ -284,7 +277,7 @@ export function createProgressUpdater(
 	};
 
 	async function update(job: Job): Promise<void> {
-		const { ctx, cwd, modelRegistry } = job;
+		const { cwd, modelRegistry } = job;
 		const abort = new AbortController();
 		controller = abort;
 		let timer: ReturnType<typeof setTimeout> | undefined;
@@ -308,7 +301,6 @@ export function createProgressUpdater(
 				tasks: document.tasks,
 				conversation: evidence,
 			});
-			// Reserve a conservative byte budget for the system prompt and generated JSON.
 			if (
 				Buffer.byteLength(payload) >
 				Math.min(MAX_INPUT_BYTES, model.contextWindow - maxTokens - 2048)
@@ -371,9 +363,7 @@ export function createProgressUpdater(
 						model: model.id,
 						usage: response.usage,
 					});
-				} catch {
-					// Ignore stale ExtensionAPI calls when the session runner was disposed mid-flight.
-				}
+				} catch {}
 			}
 			if (!current(job)) return;
 			if (response.stopReason !== "stop")
@@ -427,7 +417,7 @@ export function createProgressUpdater(
 					!(abort.signal.reason instanceof ProgressError)
 				)
 			)
-				warning(ctx, error, closing);
+				warning(job, error, closing);
 		} finally {
 			activeModelUpdate = false;
 			clearTimeout(timer);
@@ -459,12 +449,14 @@ export function createProgressUpdater(
 		schedule(ctx: ExtensionContext): void {
 			if (stopped || closing) return;
 			let entries: SessionEntry[];
+			let hasUI: boolean;
 			let cwd: string;
 			let sessionId: string;
 			let modelRegistry: ModelRegistry;
 			try {
 				entries = projectedEntries(ctx);
 				if (!hasCompletedReply(entries)) return;
+				hasUI = Boolean(ctx.hasUI);
 				cwd = ctx.cwd;
 				sessionId = ctx.sessionManager.getSessionId();
 				modelRegistry = ctx.modelRegistry;
@@ -474,6 +466,7 @@ export function createProgressUpdater(
 			controller?.abort();
 			pending = {
 				ctx,
+				hasUI,
 				cwd,
 				sessionId,
 				modelRegistry,
@@ -483,7 +476,7 @@ export function createProgressUpdater(
 			if (!running)
 				running = drain()
 					.catch((error: unknown) => {
-						if (activeJob) warning(activeJob.ctx, error, closing);
+						if (activeJob) warning(activeJob, error, closing);
 					})
 					.finally(() => {
 						running = undefined;
@@ -499,7 +492,6 @@ export function createProgressUpdater(
 		async finishBeforeExit(): Promise<void> {
 			if (!closing) {
 				closing = true;
-				// Log to stderr only when a tracked project's model update is actively in flight.
 				if (running && activeModelUpdate) {
 					console.error("Waiting for progress update before quitting Pi...");
 				}

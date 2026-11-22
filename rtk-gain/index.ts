@@ -2,14 +2,16 @@ import type {
 	AgentSettledEvent,
 	ExecResult,
 	ExtensionAPI,
-	ExtensionCommandContext,
-	ExtensionContext,
-	ExtensionUIContext,
 	SessionShutdownEvent,
 	SessionStartEvent,
 	TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import { resolveExecutable } from "../shared/executable.ts";
+import {
+	bindSession,
+	type NotifyLevel,
+	type SessionSnapshot,
+} from "../shared/session.ts";
 
 const counters = [
 	"total_commands",
@@ -19,7 +21,6 @@ const counters = [
 ] as const;
 type CounterKey = (typeof counters)[number];
 type Gain = Record<CounterKey, number>;
-type NotifyLevel = NonNullable<Parameters<ExtensionUIContext["notify"]>[1]>;
 
 const gainArgs = ["gain", "--format", "json"];
 const MAX_SANDBOX_CONCURRENCY = 8;
@@ -157,17 +158,16 @@ function formatAll(
 }
 
 export default function rtkGain(pi: ExtensionAPI): void {
-	let lifetime = new AbortController();
+	const session = bindSession(pi);
 
 	async function query<T>(
 		cwd: string,
+		signal: AbortSignal,
 		command: string,
 		args: string[],
 		parse: (json: unknown) => T | undefined,
 		onExit?: (code: number) => string,
 	): Promise<T | string> {
-		const signal = lifetime.signal;
-		// Resolve bare executables from PATH so Windows never runs binaries from cwd.
 		const executable = resolveExecutable(command);
 		if (!executable) return `${command} not found`;
 		let result: ExecResult;
@@ -200,40 +200,27 @@ export default function rtkGain(pi: ExtensionAPI): void {
 	}
 
 	let pending: Promise<Gain | string> | undefined;
-	let queued: ExtensionContext | undefined;
+	let queued: SessionSnapshot | undefined;
 
-	function readLocal(
-		ctx: ExtensionContext,
-		cwd = ctx.cwd,
-	): Promise<Gain | string> {
-		const signal = lifetime.signal;
-		const next = query(cwd, "rtk", gainArgs, summary).then(
+	function readLocal(snap: SessionSnapshot): Promise<Gain | string> {
+		const { cwd, sessionSignal: signal } = snap;
+		const next = query(cwd, signal, "rtk", gainArgs, summary).then(
 			(gain: Gain | string): Gain | string => {
 				try {
 					if (!signal.aborted) {
-						try {
-							if (ctx.hasUI) {
-								ctx.ui.setStatus(
-									"rtk-gain",
-									typeof gain === "string"
-										? undefined
-										: `RTK: ${savings(gain, compact)}`,
-								);
-							}
-						} catch {
-							// Ignore stale ExtensionContext getters if the session was replaced or disposed mid-query.
-						}
+						snap.setStatus(
+							"rtk-gain",
+							typeof gain === "string"
+								? undefined
+								: `RTK: ${savings(gain, compact)}`,
+						);
 					}
 				} finally {
 					if (pending === next) pending = undefined;
 					const follow = queued;
 					queued = undefined;
-					if (follow && !lifetime.signal.aborted) {
-						try {
-							void readLocal(follow);
-						} catch {
-							// Ignore stale queued context after session replacement or disposal.
-						}
+					if (follow && !follow.sessionSignal.aborted) {
+						void readLocal(follow);
 					}
 				}
 				return gain;
@@ -243,93 +230,65 @@ export default function rtkGain(pi: ExtensionAPI): void {
 		return next;
 	}
 
-	function refresh(ctx: ExtensionContext): void {
-		const signal = lifetime.signal;
-		let hasUI = false;
-		try {
-			hasUI = ctx.hasUI;
-		} catch {
-			return;
-		}
-		if (signal.aborted || !hasUI) return;
-		if (pending) queued = ctx;
-		else void readLocal(ctx);
+	function refresh(snap: SessionSnapshot): void {
+		if (snap.sessionSignal.aborted || !snap.hasUI) return;
+		if (pending) queued = snap;
+		else void readLocal(snap);
 	}
 
-	async function freshLocal(
-		ctx: ExtensionContext,
-		cwd = ctx.cwd,
-	): Promise<Gain | string> {
-		const signal = lifetime.signal;
-		// Wait for any in-flight background read so commands never return stale data.
+	async function freshLocal(snap: SessionSnapshot): Promise<Gain | string> {
+		const { sessionSignal: signal } = snap;
 		queued = undefined;
 		while (pending) await pending;
 		return signal.aborted
 			? "rtk was interrupted or timed out"
-			: readLocal(ctx, cwd);
+			: readLocal(snap);
 	}
 
-	pi.on(
+	session.onLifecycle(
 		"session_start",
-		(_event: SessionStartEvent, ctx: ExtensionContext): void => {
-			lifetime.abort();
-			lifetime = new AbortController();
+		(_event: SessionStartEvent, snap: SessionSnapshot | undefined): void => {
 			queued = undefined;
-			refresh(ctx);
+			if (snap) refresh(snap);
 		},
 	);
-	pi.on("turn_end", (event: TurnEndEvent, ctx: ExtensionContext): undefined => {
-		if (event.toolResults.length > 0) refresh(ctx);
-		return undefined;
-	});
-	pi.on(
-		"agent_settled",
-		(_event: AgentSettledEvent, ctx: ExtensionContext): void => refresh(ctx),
+	session.on(
+		"turn_end",
+		(event: TurnEndEvent, snap: SessionSnapshot): undefined => {
+			if (event.toolResults.length > 0) refresh(snap);
+			return undefined;
+		},
 	);
-	pi.on(
+	session.on(
+		"agent_settled",
+		(_event: AgentSettledEvent, snap: SessionSnapshot): void => refresh(snap),
+	);
+	session.onLifecycle(
 		"session_shutdown",
 		async (
 			_event: SessionShutdownEvent,
-			ctx: ExtensionContext,
+			snap: SessionSnapshot | undefined,
 		): Promise<void> => {
-			lifetime.abort();
 			queued = undefined;
-			try {
-				if (ctx.hasUI) ctx.ui.setStatus("rtk-gain", undefined);
-			} catch {
-				// Ignore stale ExtensionContext getters during teardown.
-			}
+			snap?.setStatus("rtk-gain", undefined);
 			await pending;
 		},
 	);
 
-	pi.registerCommand("rtk-gain", {
+	session.registerCommand("rtk-gain", {
 		description:
 			"Show RTK token savings here, or across the host and running Docker sandboxes: /rtk-gain [all]",
-		handler: async (
-			args: string,
-			ctx: ExtensionCommandContext,
-		): Promise<void> => {
-			const signal = lifetime.signal;
-			const { cwd } = ctx;
+		handler: async (args: string, snap: SessionSnapshot): Promise<void> => {
+			const { cwd, sessionSignal: signal } = snap;
 			const show = (text: string, level: NotifyLevel): void => {
-				if (signal.aborted) return;
-				try {
-					if (ctx.hasUI) {
-						ctx.ui.notify(text, level);
-						return;
-					}
-				} catch {
-					// Fall back to stderr if the session context became stale.
-				}
-				process.stderr.write(`${text}\n`);
+				snap.notify(text, level, { stderr: true });
 			};
 			const scope = args.trim();
 			if (scope && scope !== "all") {
 				show("Usage: /rtk-gain [all]", "error");
 				return;
 			}
-			const here = await freshLocal(ctx, cwd);
+			const here = await freshLocal(snap);
 			if (!scope) {
 				if (typeof here === "string") {
 					show(
@@ -345,6 +304,7 @@ export default function rtkGain(pi: ExtensionAPI): void {
 			const rows: [string, Gain | string][] = [["Local", here]];
 			const boxes = await query(
 				cwd,
+				signal,
 				"sbx",
 				["--no-input", "ls", "--json"],
 				sandboxes,
@@ -361,16 +321,17 @@ export default function rtkGain(pi: ExtensionAPI): void {
 							[string, Gain | string]
 						> => {
 							const label = `Sandbox ${name}`;
+							// Skip stopped sandboxes because sbx exec can start guests lacking a no-start flag.
 							if (status !== "running")
 								return [
 									label,
 									status === "stopped" ? "stopped" : "not running",
 								];
-							// Skip stopped sandboxes because sbx exec can start guests lacking a no-start flag.
 							return [
 								label,
 								await query(
 									cwd,
+									signal,
 									"sbx",
 									["--no-input", "exec", "--", name, "rtk", ...gainArgs],
 									summary,
