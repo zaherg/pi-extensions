@@ -244,7 +244,7 @@ if (args[0] === "hook") {
 		// Boundary check failure rejects before recall
 		const boundaryFail = await filterPosthook(
 			"pi-ffgrep",
-			"src/a.ts\n 1: a\n\nsrc/b.ts\n 2: b\n" + " 3: pad\n".repeat(20),
+			`src/a.ts\n 1: a\n\nsrc/b.ts\n 2: b\n${" 3: pad\n".repeat(20)}`,
 			{ configDirectory: dir, executable: bin },
 			preservesBoundaries,
 			true,
@@ -464,6 +464,12 @@ describe("coverage.ts — parseCoverageArgs, sessionFiles, scanSessions & classi
 			["git status", { results: 2, bytes: 1000 }],
 			["rtk pytest -q", { results: 1, bytes: 2000 }],
 			["env -u FOO /usr/bin/python3 script.py", { results: 3, bytes: 1500 }],
+			[
+				"SECRET=prefix\\ leaked_secret_token pytest -q",
+				{ results: 1, bytes: 400 },
+			],
+			["! pytest -k fast", { results: 1, bytes: 300 }],
+			["{ pytest; }", { results: 1, bytes: 200 }],
 			["", { results: 1, bytes: 100 }],
 		]);
 		const seen: string[] = [];
@@ -473,11 +479,18 @@ describe("coverage.ts — parseCoverageArgs, sessionFiles, scanSessions & classi
 		});
 		assert.equal(seen.includes("rtk pytest -q"), false);
 		assert.deepEqual(coverage.rewritten, { results: 3, bytes: 3000 });
-		assert.deepEqual(coverage.notRewritten, { results: 3, bytes: 1500 });
+		assert.deepEqual(coverage.notRewritten, { results: 6, bytes: 2400 });
 		assert.deepEqual(coverage.unclassified, { results: 1, bytes: 100 });
+		assert.equal(coverage.programs.has("leaked_secret_token"), false);
+		assert.equal(coverage.programs.has("!"), false);
+		assert.equal(coverage.programs.has("{"), false);
 		assert.deepEqual(coverage.programs.get("python3"), {
 			results: 3,
 			bytes: 1500,
+		});
+		assert.deepEqual(coverage.programs.get("pytest"), {
+			results: 3,
+			bytes: 900,
 		});
 	});
 });

@@ -17,6 +17,7 @@ import {
 	canCapListing,
 	categoryFor,
 	hasRawTerminalOutput,
+	hasRtkRecall,
 	isRtkWrapped,
 	MIN_BYTES,
 	MIN_SAVED_BYTES,
@@ -77,6 +78,30 @@ describe("isRtkWrapped & category helpers", () => {
 		assert.equal(isRtkWrapped("time nohup nice -n 5 env -u FOO rtk ls"), true);
 		assert.equal(isRtkWrapped("env -u rtk python3 app.py"), false);
 		assert.equal(isRtkWrapped("exec -a rtk python3 app.py"), false);
+		assert.equal(isRtkWrapped("command -v rtk git"), false);
+		assert.equal(isRtkWrapped("command -V rtk git"), false);
+		assert.equal(isRtkWrapped("command -pv rtk git"), false);
+		assert.equal(isRtkWrapped("command -p rtk git status"), true);
+		assert.equal(isRtkWrapped("cat big.log & rtk git status"), false);
+		assert.equal(isRtkWrapped("rtk git status 2>&1"), true);
+		assert.equal(isRtkWrapped("2>/dev/null rtk git status"), true);
+		assert.equal(isRtkWrapped('"rtk" git status'), true);
+		assert.equal(isRtkWrapped("\\rtk git status"), true);
+		assert.equal(isRtkWrapped(`FOO=\${BAR:-a b} rtk git status`), true);
+
+		assert.equal(hasRtkRecall("command -v rtk recall"), false);
+		assert.equal(hasRtkRecall("command -V rtk recall"), false);
+		assert.equal(hasRtkRecall("command -pv rtk recall"), false);
+		assert.equal(hasRtkRecall("command -p rtk recall 0123456789abcdef"), true);
+		assert.equal(hasRtkRecall("\\rtk recall 0123456789abcdef"), true);
+		assert.equal(hasRtkRecall('"rtk" recall 0123456789abcdef'), true);
+		assert.equal(hasRtkRecall("2>/dev/null rtk recall 0123456789abcdef"), true);
+		assert.equal(hasRtkRecall("rtk 2>/dev/null recall 0123456789abcdef"), true);
+		assert.equal(hasRtkRecall("sleep 1 & rtk recall 0123456789abcdef"), true);
+		assert.equal(
+			hasRtkRecall(`FOO=\${BAR:-a b} rtk recall 0123456789abcdef`),
+			true,
+		);
 
 		for (const sub of ["read", "bypass", "proxy", "run", "recall"]) {
 			assert.equal(isRtkWrapped(`rtk --quiet ${sub} arg`), false, sub);

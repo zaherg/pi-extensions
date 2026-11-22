@@ -17,7 +17,6 @@ export type Pipeline = "terminal" | "listing" | "generic";
 /** Minimum UTF-8 byte size before a tool result is considered for filtering. */
 export const MIN_BYTES = 512;
 
-// Skip edit and write tools because their results are short confirmations.
 const EXCLUDED = new Set(["edit", "write"]);
 // Match Pi's built-in search tools and FFF's tool names in both registration modes.
 const LISTING = new Set([
@@ -66,23 +65,18 @@ const UNFILTERED_RTK_SUBCOMMANDS = new Set([
 	"run",
 	"recall",
 ]);
+const SAFE_PROGRAM_NAME = /^(?:[A-Za-z0-9._+-]+|:)$/;
 // Match pi-lens's read-widening banner prepended ahead of the file body block.
 const PI_LENS_WIDENED =
 	/^\[pi-lens: read widened [\s\S]*?\bthis shows lines (\d+)-\d+\b/;
-// Match numbered FFF output lines bound to a preceding file heading.
 const NUMBERED_LINE = /^ \d+[:-] /;
-// Match Pi bash and MCP notices pointing to saved full output files.
 const FULL_OUTPUT_NOTICE = /^\[.*Full output: .*\]$/;
-// Match CSI, OSC, and two-byte terminal escape sequences removed by RTK's ansi method.
 const ANSI_ESCAPE =
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escapes are the match target.
 	/\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g;
-// Match `[xN]` markers emitted by RTK's dedup method after collapsed identical lines.
 const DEDUP_COUNT = /^\[x(\d+)\]$/;
 const MIN_DEDUP_RUN = 3;
-// Match lines over 2,000 characters truncated by RTK's cap method.
 const LONG_LINE_CAP = /^([\s\S]*) \[\+(\d+) chars\]$/;
-// Match one or more adjacent raw or data-URL base64 elision markers emitted by RTK.
 const BASE64_ELIDED =
 	/(?:\[base64 (?:data|[A-Za-z0-9.+-]+\/[A-Za-z0-9.+-]+), [^\]]+ elided\])+/g;
 const BASE64_MARKER_OPEN = "[base64 ";
@@ -100,6 +94,22 @@ export interface Route {
 	blockIndex?: number;
 	/** True when every active Bash command segment invoked rtk directly. */
 	wrapped?: boolean;
+}
+
+type ShellToken =
+	| {
+			kind: "word";
+			value: string;
+			dynamic: boolean;
+			quoted: boolean;
+			assignment: boolean;
+	  }
+	| { kind: "redirect" };
+
+interface SegmentInvocation {
+	name: string;
+	subcommand?: string;
+	dynamic: boolean;
 }
 
 function textBlocks(
@@ -209,6 +219,377 @@ function consumeDollarParen(
 	return { inner: command.slice(from), next: command.length };
 }
 
+function consumeDollarBrace(
+	command: string,
+	from: number,
+	substitutions: string[],
+	depth = 0,
+): { next: number; unclosed: boolean } {
+	let i = from;
+	let braces = 1;
+	let unclosed = false;
+	while (i < command.length && braces > 0) {
+		const ch = command[i];
+		if (ch === "\\") {
+			i += Math.min(2, command.length - i);
+		} else if (ch === "$" && command[i + 1] === "'") {
+			i = skipAnsiCQuoted(command, i + 2);
+		} else if (ch === "'") {
+			const next = skipSingleQuoted(command, i + 1);
+			if (command[next - 1] !== "'") unclosed = true;
+			i = next;
+		} else if (ch === '"') {
+			i++;
+			while (i < command.length && command[i] !== '"') {
+				if (command[i] === "\\") {
+					i += Math.min(2, command.length - i);
+				} else if (
+					command[i] === "$" &&
+					command[i + 1] === "(" &&
+					command[i + 2] !== "("
+				) {
+					const sub = consumeDollarParen(command, i + 2);
+					if (command[sub.next - 1] !== ")") unclosed = true;
+					substitutions.push(sub.inner);
+					i = sub.next;
+				} else if (command[i] === "$" && command[i + 1] === "{") {
+					const nested =
+						depth < 16
+							? consumeDollarBrace(command, i + 2, substitutions, depth + 1)
+							: { next: i + 2, unclosed: true };
+					if (nested.unclosed) unclosed = true;
+					i = nested.next;
+				} else if (command[i] === "`") {
+					const sub = consumeBackticks(command, i + 1);
+					if (command[sub.next - 1] !== "`") unclosed = true;
+					substitutions.push(sub.inner);
+					i = sub.next;
+				} else {
+					i++;
+				}
+			}
+			if (i < command.length) i++;
+			else unclosed = true;
+		} else if (ch === "$" && command[i + 1] === "(" && command[i + 2] !== "(") {
+			const sub = consumeDollarParen(command, i + 2);
+			if (command[sub.next - 1] !== ")") unclosed = true;
+			substitutions.push(sub.inner);
+			i = sub.next;
+		} else if (ch === "$" && command[i + 1] === "{") {
+			const nested =
+				depth < 16
+					? consumeDollarBrace(command, i + 2, substitutions, depth + 1)
+					: { next: i + 2, unclosed: true };
+			if (nested.unclosed) unclosed = true;
+			i = nested.next;
+		} else if (ch === "`") {
+			const sub = consumeBackticks(command, i + 1);
+			if (command[sub.next - 1] !== "`") unclosed = true;
+			substitutions.push(sub.inner);
+			i = sub.next;
+		} else if (ch === "{") {
+			braces++;
+			i++;
+		} else if (ch === "}") {
+			braces--;
+			i++;
+		} else {
+			i++;
+		}
+	}
+	if (braces > 0) unclosed = true;
+	return { next: i, unclosed };
+}
+
+function consumeRedirectOperator(command: string, from: number): number {
+	const two = command.slice(from, from + 2);
+	const three = command.slice(from, from + 3);
+	if (three === "<<-" || three === "<<<" || three === "&>>") return from + 3;
+	if (
+		two === "<<" ||
+		two === ">>" ||
+		two === "<&" ||
+		two === ">&" ||
+		two === "<>" ||
+		two === ">|" ||
+		two === "&>"
+	) {
+		return from + 2;
+	}
+	return from + 1;
+}
+
+function scanShellSegments(command: string): {
+	segments: ShellToken[][];
+	substitutions: string[];
+	unclosed: boolean;
+} {
+	const segments: ShellToken[][] = [];
+	const substitutions: string[] = [];
+	let current: ShellToken[] = [];
+	let unclosed = false;
+
+	let wordActive = false;
+	let wordValue = "";
+	let wordDynamic = false;
+	let wordQuoted = false;
+	let wordAssignment = false;
+	let sawEquals = false;
+
+	const resetWord = (): void => {
+		wordActive = false;
+		wordValue = "";
+		wordDynamic = false;
+		wordQuoted = false;
+		wordAssignment = false;
+		sawEquals = false;
+	};
+
+	const flushWord = (): void => {
+		if (!wordActive) return;
+		current.push({
+			kind: "word",
+			value: wordValue,
+			dynamic: wordDynamic,
+			quoted: wordQuoted,
+			assignment: wordAssignment,
+		});
+		resetWord();
+	};
+
+	const flushSegment = (): void => {
+		flushWord();
+		if (current.length > 0) {
+			segments.push(current);
+			current = [];
+		}
+	};
+
+	const consumeDollarInWord = (at: number): number => {
+		if (command[at + 1] === "(" && command[at + 2] === "(") {
+			const arith = consumeDollarParen(command, at + 2);
+			if (command[arith.next - 1] !== ")") unclosed = true;
+			wordActive = true;
+			wordDynamic = true;
+			return arith.next;
+		}
+		if (command[at + 1] === "(") {
+			const sub = consumeDollarParen(command, at + 2);
+			if (command[sub.next - 1] !== ")") unclosed = true;
+			substitutions.push(sub.inner);
+			wordActive = true;
+			wordDynamic = true;
+			return sub.next;
+		}
+		if (command[at + 1] === "{") {
+			const brace = consumeDollarBrace(command, at + 2, substitutions);
+			if (brace.unclosed) unclosed = true;
+			wordActive = true;
+			wordDynamic = true;
+			return brace.next;
+		}
+		const nextChar = command[at + 1] ?? "";
+		if (/[A-Za-z_0-9@#?*!$-]/.test(nextChar)) {
+			wordActive = true;
+			wordDynamic = true;
+			let end = at + 2;
+			if (/[A-Za-z_]/.test(nextChar)) {
+				while (end < command.length && /[A-Za-z0-9_]/.test(command[end] ?? ""))
+					end++;
+			}
+			return end;
+		}
+		wordActive = true;
+		wordValue += "$";
+		return at + 1;
+	};
+
+	let i = 0;
+	while (i < command.length) {
+		const ch = command[i] ?? "";
+		if (ch === "\\" && command[i + 1] === "\n") {
+			i += 2;
+			continue;
+		}
+		if (ch === "\\" && command[i + 1] === "\r" && command[i + 2] === "\n") {
+			i += 3;
+			continue;
+		}
+		if (ch === " " || ch === "\t" || ch === "\r") {
+			flushWord();
+			i++;
+			continue;
+		}
+		if (!wordActive && ch === "#") {
+			while (i < command.length && command[i] !== "\n") i++;
+			continue;
+		}
+		if (
+			(ch === "<" || ch === ">") &&
+			command[i + 1] === "(" &&
+			(!wordActive ||
+				(!wordQuoted && !wordDynamic && /^[0-9]+$/.test(wordValue)))
+		) {
+			if (wordActive) resetWord();
+			const sub = consumeDollarParen(command, i + 2);
+			if (command[sub.next - 1] !== ")") unclosed = true;
+			substitutions.push(sub.inner);
+			current.push({
+				kind: "word",
+				value: "",
+				dynamic: true,
+				quoted: false,
+				assignment: false,
+			});
+			i = sub.next;
+			continue;
+		}
+		if (
+			ch === "<" ||
+			ch === ">" ||
+			(!wordActive && ch === "&" && command[i + 1] === ">")
+		) {
+			if (
+				wordActive &&
+				!wordQuoted &&
+				!wordDynamic &&
+				/^[0-9]+$/.test(wordValue)
+			) {
+				resetWord();
+			} else {
+				flushWord();
+			}
+			current.push({ kind: "redirect" });
+			i = consumeRedirectOperator(command, i);
+			continue;
+		}
+		if (ch === "\n" || ch === ";" || ch === "(" || ch === ")") {
+			flushSegment();
+			i++;
+			continue;
+		}
+		if (
+			(ch === "&" && command[i + 1] === "&") ||
+			(ch === "|" && (command[i + 1] === "|" || command[i + 1] === "&"))
+		) {
+			flushSegment();
+			i += 2;
+			continue;
+		}
+		if (ch === "|" || ch === "&") {
+			flushSegment();
+			i++;
+			continue;
+		}
+		if (ch === "\\") {
+			wordActive = true;
+			wordQuoted = true;
+			if (i + 1 < command.length) {
+				wordValue += command[i + 1] ?? "";
+				i += 2;
+			} else {
+				i++;
+			}
+			continue;
+		}
+		if (ch === "$" && command[i + 1] === "'") {
+			wordActive = true;
+			wordQuoted = true;
+			const next = skipAnsiCQuoted(command, i + 2);
+			if (command[next - 1] !== "'") unclosed = true;
+			wordValue += command.slice(
+				i + 2,
+				next - (command[next - 1] === "'" ? 1 : 0),
+			);
+			i = next;
+			continue;
+		}
+		if (ch === "'") {
+			wordActive = true;
+			wordQuoted = true;
+			const next = skipSingleQuoted(command, i + 1);
+			if (command[next - 1] !== "'") unclosed = true;
+			wordValue += command.slice(
+				i + 1,
+				next - (command[next - 1] === "'" ? 1 : 0),
+			);
+			i = next;
+			continue;
+		}
+		if (ch === '"') {
+			wordActive = true;
+			wordQuoted = true;
+			i++;
+			while (i < command.length && command[i] !== '"') {
+				if (command[i] === "\\" && command[i + 1] === "\n") {
+					i += 2;
+				} else if (
+					command[i] === "\\" &&
+					command[i + 1] === "\r" &&
+					command[i + 2] === "\n"
+				) {
+					i += 3;
+				} else if (command[i] === "\\" && i + 1 < command.length) {
+					const escaped = command[i + 1] ?? "";
+					if (
+						escaped === '"' ||
+						escaped === "$" ||
+						escaped === "`" ||
+						escaped === "\\"
+					) {
+						wordValue += escaped;
+					} else {
+						wordValue += `\\${escaped}`;
+					}
+					i += 2;
+				} else if (command[i] === "$") {
+					i = consumeDollarInWord(i);
+				} else if (command[i] === "`") {
+					const sub = consumeBackticks(command, i + 1);
+					if (command[sub.next - 1] !== "`") unclosed = true;
+					substitutions.push(sub.inner);
+					wordDynamic = true;
+					i = sub.next;
+				} else {
+					wordValue += command[i] ?? "";
+					i++;
+				}
+			}
+			if (i < command.length) i++;
+			else unclosed = true;
+			continue;
+		}
+		if (ch === "$") {
+			i = consumeDollarInWord(i);
+			continue;
+		}
+		if (ch === "`") {
+			const sub = consumeBackticks(command, i + 1);
+			if (command[sub.next - 1] !== "`") unclosed = true;
+			substitutions.push(sub.inner);
+			wordActive = true;
+			wordDynamic = true;
+			i = sub.next;
+			continue;
+		}
+		if (ch === "=" && !sawEquals) {
+			sawEquals = true;
+			if (
+				!wordQuoted &&
+				!wordDynamic &&
+				/^[A-Za-z_][A-Za-z0-9_]*\+?$/.test(wordValue)
+			) {
+				wordAssignment = true;
+			}
+		}
+		wordActive = true;
+		wordValue += ch;
+		i++;
+	}
+	flushSegment();
+	return { segments, substitutions, unclosed };
+}
+
 function scanShell(command: string): {
 	sanitized: string;
 	substitutions: string[];
@@ -304,41 +685,102 @@ export function sanitizeShell(command: string): string {
 }
 
 function parseSegmentInvocation(
-	segment: string,
-): { name: string; subcommand?: string } | undefined {
-	const words = segment.match(/[^\s(){}]+/g) ?? [];
+	tokens: readonly ShellToken[],
+): SegmentInvocation | undefined {
 	let index = 0;
-	while (index < words.length) {
-		const word = words[index] ?? "";
-		if (word === "!" || word.includes("=")) {
+	let lastPrefix: string | undefined;
+	while (index < tokens.length) {
+		const token = tokens[index];
+		if (!token) break;
+		if (token.kind === "redirect") {
+			index += 2;
+			continue;
+		}
+		if (
+			!token.quoted &&
+			!token.dynamic &&
+			(token.value === "!" || token.value === "{" || token.value === "}")
+		) {
 			index++;
 			continue;
 		}
-		const base = word.slice(word.lastIndexOf("/") + 1);
-		if (SHELL_PREFIX.has(base)) {
+		if (token.assignment) {
 			index++;
-			while ((words[index] ?? "").startsWith("-")) {
-				const flag = words[index] ?? "";
-				index++;
-				if (flag === "--") break;
-				if (
-					SHELL_PREFIX_FLAGS_WITH_ARG[base]?.has(flag) &&
-					index < words.length
-				) {
-					index++;
+			continue;
+		}
+		if (token.dynamic || token.value === "") {
+			return { name: "", dynamic: true };
+		}
+		const base = token.value.slice(token.value.lastIndexOf("/") + 1);
+		if (SHELL_PREFIX.has(base)) {
+			lastPrefix = base;
+			index++;
+			while (index < tokens.length) {
+				const next = tokens[index];
+				if (!next) break;
+				if (next.kind === "redirect") {
+					index += 2;
+					continue;
 				}
+				if (!next.dynamic && next.value.startsWith("-")) {
+					const flag = next.value;
+					index++;
+					if (flag === "--") break;
+					if (base === "command" && /^-[A-Za-z]*[vV][A-Za-z]*$/.test(flag)) {
+						return { name: "command", dynamic: false };
+					}
+					if (
+						SHELL_PREFIX_FLAGS_WITH_ARG[base]?.has(flag) &&
+						index < tokens.length
+					) {
+						index++;
+					}
+					continue;
+				}
+				break;
 			}
 			continue;
 		}
-		break;
+		let subcommand: string | undefined;
+		for (let sub = index + 1; sub < tokens.length; sub++) {
+			const arg = tokens[sub];
+			if (!arg) break;
+			if (arg.kind === "redirect") {
+				sub++;
+				continue;
+			}
+			if (arg.value.startsWith("-")) continue;
+			if (arg.dynamic) break;
+			subcommand = arg.value;
+			break;
+		}
+		return subcommand === undefined
+			? { name: base, dynamic: false }
+			: { name: base, subcommand, dynamic: false };
 	}
-	const program = words[index];
-	if (program === undefined || program === "''") return undefined;
-	const name = program.slice(program.lastIndexOf("/") + 1);
-	const subcommand = words
-		.slice(index + 1)
-		.find((token: string) => !token.startsWith("-"));
-	return subcommand === undefined ? { name } : { name, subcommand };
+	return lastPrefix === undefined
+		? undefined
+		: { name: lastPrefix, dynamic: false };
+}
+
+/** Return the leading safe program name for a shell command, or "?" when dynamic or unknown. */
+export function leadingShellProgram(command: string): string {
+	const { segments } = scanShellSegments(command);
+	let fallback: string | undefined;
+	for (const segment of segments) {
+		const invocation = parseSegmentInvocation(segment);
+		if (!invocation) continue;
+		if (
+			invocation.dynamic ||
+			invocation.name.length > 64 ||
+			!SAFE_PROGRAM_NAME.test(invocation.name)
+		) {
+			return "?";
+		}
+		fallback ??= invocation.name;
+		if (!SHELL_SETUP.has(invocation.name)) return invocation.name;
+	}
+	return fallback ?? "?";
 }
 
 /** Leave rtk recall output untouched even behind prefixes, flags, subshells, or command substitutions. */
@@ -346,10 +788,15 @@ export function hasRtkRecall(command: string): boolean {
 	const queue = [command];
 	for (let cursor = 0; cursor < queue.length && cursor < 64; cursor++) {
 		const current = queue[cursor] ?? "";
-		const { sanitized, substitutions } = scanShell(current);
-		for (const segment of sanitized.split(/(?:&&|\|\||;|\||\n|[()])+/)) {
+		const { segments, substitutions } = scanShellSegments(current);
+		for (const segment of segments) {
 			const invocation = parseSegmentInvocation(segment);
-			if (invocation?.name === "rtk" && invocation.subcommand === "recall") {
+			if (
+				invocation &&
+				!invocation.dynamic &&
+				invocation.name === "rtk" &&
+				invocation.subcommand === "recall"
+			) {
 				return true;
 			}
 		}
@@ -365,15 +812,14 @@ export function isRtkWrapped(command: string): boolean {
 	for (let cursor = 0; cursor < queue.length; cursor++) {
 		if (cursor >= 64) return false;
 		const current = queue[cursor] ?? "";
-		const { sanitized, substitutions, unclosedSubstitution } =
-			scanShell(current);
-		if (unclosedSubstitution) return false;
-		for (const segment of sanitized.split(/(?:&&|\|\||;|\||\n|[()])+/)) {
+		const { segments, substitutions, unclosed } = scanShellSegments(current);
+		if (unclosed) return false;
+		for (const segment of segments) {
 			const invocation = parseSegmentInvocation(segment);
-			if (!invocation || SHELL_SETUP.has(invocation.name)) continue;
+			if (!invocation) continue;
+			if (!invocation.dynamic && SHELL_SETUP.has(invocation.name)) continue;
 			if (cursor === 0) topActive++;
-			if (invocation.name !== "rtk") return false;
-			// Skip rtk subcommands that pass raw unfiltered output through.
+			if (invocation.dynamic || invocation.name !== "rtk") return false;
 			if (
 				invocation.subcommand === undefined ||
 				UNFILTERED_RTK_SUBCOMMANDS.has(invocation.subcommand)
@@ -445,7 +891,6 @@ export function select(event: ToolResultEvent, cwd: string): Route | undefined {
 				? bashFileView(command, cwd)
 				: undefined;
 		if (path !== undefined) return { category: "read", text, path };
-		// Include failed commands because cap preserves their trailing lines.
 		return isRtkWrapped(command)
 			? { category: "terminal", text, wrapped: true }
 			: { category: "terminal", text };
@@ -460,7 +905,6 @@ export function rtkToolName(toolName: string): string {
 	return `pi-${toolName}`;
 }
 
-/** Normalize a line using the same ANSI and carriage-return rules as RTK. */
 function rendered(line: string | undefined): string | undefined {
 	if (line === undefined) return undefined;
 	const visible = line.replace(ANSI_ESCAPE, "");
@@ -479,13 +923,11 @@ function lastNonEmptyLines(text: string, limit: number): string[] {
 		index--
 	) {
 		const line = lines[index] ?? "";
-		// Skip lines whose visible text is empty once terminal escapes and CR resets are stripped.
 		if ((rendered(line) ?? "").trim() !== "") found.push(line);
 	}
 	return found;
 }
 
-/** Count trailing consecutive lines matching the final non-empty visible line. */
 function trailingRepeatCount(text: string): number {
 	const lines = text.split("\n");
 	let index = lines.length - 1;
@@ -511,7 +953,6 @@ function isBase64Code(code: number): boolean {
 	);
 }
 
-/** Advance across one or more adjacent raw or data-URL base64 runs of at least 1,024 chars. */
 function consumeBase64Span(
 	text: string,
 	from: number,
@@ -527,7 +968,6 @@ function consumeBase64Span(
 			return minEnd < 0 ? undefined : { minEnd, spanEnd: cursor };
 		}
 		if (minEnd < 0) minEnd = runStart + MIN_BASE64_RUN;
-		// Step into an adjacent `data:...;base64,` URI whose leading `data` was scanned as base64.
 		if (
 			text.charCodeAt(end) === 58 &&
 			end - 4 >= runStart + MIN_BASE64_RUN &&
@@ -544,7 +984,6 @@ function consumeBase64Span(
 	return minEnd < 0 ? undefined : { minEnd, spanEnd: cursor };
 }
 
-/** Complete a trailing base64 elision marker when cap truncated inside it. */
 function withCompleteTrailingBase64Marker(prefix: string): string | undefined {
 	const open = prefix.lastIndexOf("[");
 	if (open < 0 || prefix.indexOf("]", open) >= 0) return undefined;
@@ -558,7 +997,6 @@ function withCompleteTrailingBase64Marker(prefix: string): string | undefined {
 	return undefined;
 }
 
-/** Check that base64 elision markers replace valid base64 runs of at least 1,024 characters. */
 function matchesBase64Elided(
 	original: string,
 	filtered: string,
@@ -593,7 +1031,6 @@ function matchesBase64Elided(
 	return false;
 }
 
-/** Check that RTK preserved the final line modulo allowed terminal and cap rewrites. */
 function matchesLastLine(
 	original: string | undefined,
 	filtered: string | undefined,
@@ -674,11 +1111,9 @@ export function canCapListing(
 	return preservesBoundaries(text, simulated);
 }
 
-// Require a minimum byte reduction on all rewrites, plus a 10% floor on lossy file summaries.
 export const MIN_SAVED_BYTES = 128;
 export const MIN_SAVED_RATIO = 0.1;
 
-/** Require lossless, dedup, and RTK replacements to save at least MIN_SAVED_BYTES. */
 export function worthReplacing(original: string, replacement: string): boolean {
 	return (
 		Buffer.byteLength(original) - Buffer.byteLength(replacement) >=
@@ -686,7 +1121,6 @@ export function worthReplacing(original: string, replacement: string): boolean {
 	);
 }
 
-/** Require lossy non-code file summaries to save both MIN_SAVED_BYTES and MIN_SAVED_RATIO. */
 export function worthCondensing(
 	original: string,
 	replacement: string,

@@ -16,16 +16,12 @@ import {
 import {
 	categoryFor,
 	isRtkWrapped,
+	leadingShellProgram,
 	MIN_BYTES,
-	SHELL_PREFIX,
-	SHELL_PREFIX_FLAGS_WITH_ARG,
-	SHELL_SETUP,
-	sanitizeShell,
 } from "./policy.ts";
 
 const DEFAULT_DAYS = 30;
 const MAX_DAYS = 365;
-// Classify the largest commands first when spawning rtk rewrite.
 const MAX_CLASSIFIED = 2_000;
 const CONCURRENCY = 8;
 const TOP_TOOLS = 15;
@@ -131,7 +127,6 @@ function add(usage: Map<string, Usage>, key: string, bytes: number): void {
 	} else usage.set(key, { results: 1, bytes });
 }
 
-/** Recursively collect Pi session `.jsonl` files under directory without following symlinks. */
 async function jsonlFiles(directory: string, depth = 0): Promise<string[]> {
 	try {
 		const entries = await readdir(directory, { withFileTypes: true });
@@ -222,7 +217,6 @@ function scanOutcomeEntry(
 	for (const tally of data.tallies) mergeTallies(scan.tallies, tally);
 }
 
-/** Record bash commands issued by the model before any tool_call hook rewrites them. */
 function collectBashCommands(
 	content: unknown[],
 	commands: Map<string, string>,
@@ -265,7 +259,6 @@ function scanEntry(
 		scanOutcomeEntry(entry, sinceMs, scan);
 		return;
 	}
-	// Ignore non-session records such as subagent transcript artifacts.
 	if (entry.type !== "message") return;
 	const message = entry.message;
 	if (!isRecord(message)) return;
@@ -326,51 +319,6 @@ export interface BashCoverage {
 	programs: Map<string, Usage>;
 }
 
-function segmentProgram(segment: string): string | undefined {
-	// Skip VAR=value assignments and transparent command wrappers so values never print.
-	const words = segment.match(/[^\s;&|()]+/g) ?? [];
-	let fallback: string | undefined;
-	let prefix: string | undefined;
-	let skipNextArg = false;
-	for (const word of words) {
-		if (skipNextArg) {
-			skipNextArg = false;
-			continue;
-		}
-		if (word.includes("=")) continue;
-		if (prefix !== undefined && word.startsWith("-")) {
-			if (word === "--") {
-				prefix = undefined;
-				continue;
-			}
-			if (SHELL_PREFIX_FLAGS_WITH_ARG[prefix]?.has(word)) skipNextArg = true;
-			continue;
-		}
-		prefix = undefined;
-		const name = word.slice(word.lastIndexOf("/") + 1);
-		fallback ??= name;
-		if (SHELL_PREFIX.has(name)) {
-			prefix = name;
-			continue;
-		}
-		return name;
-	}
-	return fallback;
-}
-
-function program(command: string): string {
-	// Join line continuations and blank quoted literals so embedded separators or secrets never surface.
-	const sanitized = sanitizeShell(command);
-	let fallback: string | undefined;
-	for (const segment of sanitized.split(/(?:&&|\|\||;|\n)+/)) {
-		const name = segmentProgram(segment);
-		if (name === undefined || name === "''") continue;
-		fallback ??= name;
-		if (!SHELL_SETUP.has(name)) return name;
-	}
-	return fallback ?? "?";
-}
-
 function merge(target: Usage, usage: Usage): void {
 	target.results += usage.results;
 	target.bytes += usage.bytes;
@@ -404,7 +352,7 @@ export async function classifyBash(
 			else if (rewritten) merge(coverage.rewritten, usage);
 			else {
 				merge(coverage.notRewritten, usage);
-				const name = program(command);
+				const name = leadingShellProgram(command);
 				const current = coverage.programs.get(name) ?? { results: 0, bytes: 0 };
 				merge(current, usage);
 				coverage.programs.set(name, current);
@@ -451,13 +399,11 @@ function byBytes<K>(usage: Iterable<[K, Usage]>): [K, Usage][] {
 }
 
 interface Savings {
-	/** Original bytes of accepted replacements. */
 	touched: number;
 	saved: number;
 	results: number;
 }
 
-/** Sum byte savings from accepted replacements grouped by key. */
 function savingsBy(
 	scan: Scan,
 	key: (tally: Tally) => string,
@@ -475,7 +421,6 @@ function savingsBy(
 	return savings;
 }
 
-// Sanitize tool and program names before rendering them in the report.
 function label(name: string, limit = 16): string {
 	return displayLabel(name, limit) || "?";
 }
@@ -498,7 +443,6 @@ function toolSection(scan: Scan): string[] {
 		(sum: number, item: Savings) => sum + item.touched,
 		0,
 	);
-	// Sessions store delivered text, so original volume equals delivered bytes plus accepted savings.
 	const original = delivered + saved;
 	const tools = [...scan.tools]
 		.map(([tool, usage]: [string, Usage]) => {
