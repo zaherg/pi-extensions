@@ -7,6 +7,7 @@ import type {
 import { displayLabel, displayTail } from "../shared/display.ts";
 
 const PAGE_SIZE = 25;
+const MAX_NESTED = 10;
 const OLDER = "Older results →";
 const NEWER = "← Newer results";
 
@@ -27,6 +28,11 @@ interface NestedCall {
 	args: string;
 	status: string;
 	error: string;
+}
+
+interface IndexedNestedCall {
+	index: number;
+	call: NestedCall;
 }
 
 interface TraceItem {
@@ -86,7 +92,69 @@ export function codemodeCalls(msg: ToolResultMessage): NestedCall[] {
 	return out;
 }
 
-function diagnostic(msg: ToolResultMessage): string {
+function selectNestedCalls(
+	nested: readonly NestedCall[],
+	tool?: string,
+): { shown: IndexedNestedCall[]; prioritized: boolean } {
+	if (nested.length <= MAX_NESTED) {
+		return {
+			shown: nested.map(
+				(call: NestedCall, i: number): IndexedNestedCall => ({
+					index: i + 1,
+					call,
+				}),
+			),
+			prioritized: false,
+		};
+	}
+	const filterTool = tool && tool !== "codemode" ? tool : undefined;
+	const tailStart = nested.length - MAX_NESTED;
+	const head = nested.slice(0, tailStart);
+	const tail = nested.slice(tailStart);
+	const tailCovers = filterTool
+		? !head.some(
+				(c: NestedCall): boolean => c.name === filterTool && isFailedCall(c),
+			) &&
+			(!nested.some((c: NestedCall): boolean => c.name === filterTool) ||
+				tail.some((c: NestedCall): boolean => c.name === filterTool))
+		: !head.some(isFailedCall);
+	if (tailCovers) {
+		return {
+			shown: tail.map(
+				(call: NestedCall, i: number): IndexedNestedCall => ({
+					index: tailStart + i + 1,
+					call,
+				}),
+			),
+			prioritized: false,
+		};
+	}
+	const chosen = new Set<number>();
+	const addMatching = (predicate: (c: NestedCall) => boolean): void => {
+		for (let i = nested.length - 1; i >= 0 && chosen.size < MAX_NESTED; i--) {
+			const c = nested[i];
+			if (c && predicate(c)) chosen.add(i);
+		}
+	};
+	if (filterTool) {
+		addMatching(
+			(c: NestedCall): boolean => c.name === filterTool && isFailedCall(c),
+		);
+	}
+	addMatching(isFailedCall);
+	if (filterTool) {
+		addMatching((c: NestedCall): boolean => c.name === filterTool);
+	}
+	addMatching((): boolean => true);
+	const shown: IndexedNestedCall[] = [];
+	for (const i of [...chosen].sort((a: number, b: number): number => a - b)) {
+		const call = nested[i];
+		if (call) shown.push({ index: i + 1, call });
+	}
+	return { shown, prioritized: true };
+}
+
+function diagnostic(msg: ToolResultMessage, tool?: string): string {
 	// Keep only a bounded text tail without loading referenced files or rendering images.
 	const { content } = msg;
 	let text = "";
@@ -121,14 +189,22 @@ function diagnostic(msg: ToolResultMessage): string {
 	);
 	const nested = codemodeCalls(msg);
 	if (!nested.length) return tail;
+	const { shown, prioritized } = selectNestedCalls(nested, tool);
 	const lines = ["[Nested calls]"];
-	if (nested.length > 10) lines.push(`(Showing last 10 of ${nested.length})`);
-	for (const c of nested.slice(-10)) {
+	if (nested.length > MAX_NESTED) {
+		lines.push(
+			prioritized
+				? `(Showing ${shown.length} of ${nested.length}; errors/matches prioritized)`
+				: `(Showing last ${shown.length} of ${nested.length})`,
+		);
+	}
+	for (const { index, call: c } of shown) {
+		const step = nested.length > MAX_NESTED ? `#${index} ` : "";
 		const name = displayLabel(c.name, 32) || "?";
 		const arg = c.args ? displayLabel(c.args, 40) : "";
 		const err = c.error ? displayLabel(c.error, 120) : "";
 		lines.push(
-			`- ${c.status} ${name}${arg ? ` (${arg})` : ""}${err ? `: ${err}` : ""}`,
+			`- ${step}${c.status} ${name}${arg ? ` (${arg})` : ""}${err ? `: ${err}` : ""}`,
 		);
 	}
 	return `${lines.join("\n")}\n\n${tail}`;
@@ -136,10 +212,12 @@ function diagnostic(msg: ToolResultMessage): string {
 
 export default function trace(pi: ExtensionAPI): void {
 	let branch = new AbortController();
-	pi.on("session_tree", (): void => {
+	const resetBranch = (): void => {
 		branch.abort();
 		branch = new AbortController();
-	});
+	};
+	pi.on("session_start", resetBranch);
+	pi.on("session_tree", resetBranch);
 	pi.on("session_shutdown", (): void => branch.abort());
 
 	pi.registerCommand("trace", {
@@ -176,17 +254,21 @@ export default function trace(pi: ExtensionAPI): void {
 					if (entry.message.role !== "toolResult") return [];
 					const msg = entry.message;
 					const nested = codemodeCalls(msg);
-					const failedNested = nested.filter(isFailedCall).length;
+					const allFailedNested = nested.some(isFailedCall);
+					const relevantNested =
+						tool && tool !== "codemode"
+							? nested.filter((c: NestedCall): boolean => c.name === tool)
+							: nested;
+					const failedNested = relevantNested.filter(isFailedCall).length;
 					const hasFailedNestedCall = failedNested > 0;
 					if (nested.length > 0) {
 						const directMatch =
-							(!failedOnly || msg.isError === true || hasFailedNestedCall) &&
+							(!failedOnly || msg.isError === true || allFailedNested) &&
 							(!tool || tool === "codemode");
 						const nestedMatch =
 							Boolean(tool && tool !== "codemode") &&
-							nested.some(
-								(c: NestedCall): boolean =>
-									c.name === tool && (!failedOnly || isFailedCall(c)),
+							relevantNested.some(
+								(c: NestedCall): boolean => !failedOnly || isFailedCall(c),
 							);
 						if (!directMatch && !nestedMatch) return [];
 					} else if (
@@ -198,11 +280,11 @@ export default function trace(pi: ExtensionAPI): void {
 					const nestedTool =
 						tool && tool !== "codemode" ? displayLabel(tool, 24) : "";
 					const hint =
-						nested.length > 0 && (failedNested > 0 || nestedTool)
+						relevantNested.length > 0 && (failedNested > 0 || nestedTool)
 							? failedNested > 0 && nestedTool
-								? `[${nestedTool} ${failedNested}/${nested.length} err]`
+								? `[${nestedTool} ${failedNested}/${relevantNested.length} err]`
 								: failedNested > 0
-									? `[${failedNested}/${nested.length} err]`
+									? `[${failedNested}/${relevantNested.length} err]`
 									: `[${nestedTool}]`
 							: "";
 					const preview = [hint, callPreview(calls.get(msg.toolCallId))]
@@ -223,6 +305,7 @@ export default function trace(pi: ExtensionAPI): void {
 				ctx.ui.notify("No matching tool results on this branch.", "info");
 				return;
 			}
+			resetBranch();
 			const { signal } = branch;
 			let offset = 0;
 			for (;;) {
@@ -266,7 +349,7 @@ export default function trace(pi: ExtensionAPI): void {
 						return;
 					}
 					ctx.ui.notify(
-						`${pick}\n${diagnostic(selected.msg)}`,
+						`${pick}\n${diagnostic(selected.msg, tool)}`,
 						selected.msg.isError || selected.hasFailedNestedCall
 							? "warning"
 							: "info",
