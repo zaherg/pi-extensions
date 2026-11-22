@@ -1,9 +1,11 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { Pipeline } from "./policy.ts";
+import { canCapListing, type Pipeline } from "./policy.ts";
 
 // Thresholds matching RTK 1.2's cap and dedup methods.
 const CAP_LINES = 300;
+const CAP_HEAD_LINES = 50;
+const CAP_TAIL_LINES = 200;
 const CAP_LINE_CHARS = 2_000;
 const DEDUP_RUN = 3;
 const BASE64_RUN = /[A-Za-z0-9+/]{1024,}/;
@@ -81,6 +83,13 @@ export function createGate(root: string): Gate {
 		} catch {
 			// Fall back to running RTK when the pipeline file cannot be inspected.
 			return true;
+		}
+		if (
+			profile === "listing" &&
+			(methods === undefined || methods.includes("cap")) &&
+			!canCapListing(text, CAP_HEAD_LINES, CAP_TAIL_LINES, CAP_LINES)
+		) {
+			return false;
 		}
 		if (methods === undefined) return true;
 		return methods.some((name: string) => TRIGGERS[name]?.(text) ?? true);

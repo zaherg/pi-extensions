@@ -31,7 +31,7 @@ const LISTING = new Set([
 ]);
 // Leave rtk recall output untouched so stored originals reach the model verbatim.
 const RTK_RECALL = /(?:^|[|&;(\s])(?:\S*\/)?rtk\s+recall\b/;
-const SHELL_SETUP = new Set([
+export const SHELL_SETUP = new Set([
 	"cd",
 	"set",
 	"export",
@@ -46,13 +46,27 @@ const SHELL_SETUP = new Set([
 	"true",
 	":",
 ]);
-const SHELL_PREFIX = new Set([
+export const SHELL_PREFIX = new Set([
 	"env",
 	"time",
 	"command",
 	"exec",
 	"nohup",
 	"nice",
+]);
+export const SHELL_PREFIX_FLAGS_WITH_ARG: Readonly<
+	Record<string, ReadonlySet<string>>
+> = {
+	env: new Set(["-u", "-C", "-S", "--unset", "--chdir", "--split-string"]),
+	nice: new Set(["-n", "--adjustment"]),
+	exec: new Set(["-a"]),
+};
+const UNFILTERED_RTK_SUBCOMMANDS = new Set([
+	"read",
+	"bypass",
+	"proxy",
+	"run",
+	"recall",
 ]);
 // Match pi-lens's read-widening banner prepended ahead of the file body block.
 const PI_LENS_WIDENED =
@@ -129,6 +143,12 @@ export function isRtkWrapped(command: string): boolean {
 					const flag = words[index] ?? "";
 					index++;
 					if (flag === "--") break;
+					if (
+						SHELL_PREFIX_FLAGS_WITH_ARG[base]?.has(flag) &&
+						index < words.length
+					) {
+						index++;
+					}
 				}
 				continue;
 			}
@@ -143,8 +163,9 @@ export function isRtkWrapped(command: string): boolean {
 		const subcommand = words
 			.slice(index + 1)
 			.find((token: string) => !token.startsWith("-"));
-		// `rtk read` prints raw file contents without terminal filtering.
-		if (subcommand === undefined || subcommand === "read") return false;
+		// Skip rtk subcommands that pass raw unfiltered output through.
+		if (subcommand === undefined || UNFILTERED_RTK_SUBCOMMANDS.has(subcommand))
+			return false;
 	}
 	return active > 0;
 }
@@ -418,6 +439,24 @@ export function structureCheck(pipeline: Pipeline): StructureCheck {
 		// Check FFF group boundaries when override-mode output uses native tool names.
 		(!original.split("\n").some((line: string) => NUMBERED_LINE.test(line)) ||
 			preservesBoundaries(original, filtered));
+}
+
+/** Return false when RTK's head/tail line cap would drop FFF file-group boundaries. */
+export function canCapListing(
+	text: string,
+	headLines = 50,
+	tailLines = 200,
+	maxLines = 300,
+): boolean {
+	const lines = text.split("\n");
+	if (lines.length <= maxLines) return true;
+	if (!lines.some((line: string) => NUMBERED_LINE.test(line))) return true;
+	const simulated = [
+		...lines.slice(0, headLines),
+		`[... ${lines.length - headLines - tailLines} lines elided ...]`,
+		...lines.slice(-tailLines),
+	].join("\n");
+	return preservesBoundaries(text, simulated);
 }
 
 // Require a minimum byte reduction on all rewrites, plus a 10% floor on lossy file summaries.

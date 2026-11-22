@@ -34,6 +34,7 @@ import { type Dependencies, type Processed, processRoute } from "./process.ts";
 import { resolvePath } from "./views.ts";
 
 const REWRITE_TIMEOUT_MS = 2_000;
+const MISSING_RTK = /^spawn\b.*\bENOENT\b/;
 
 const FAILURE_MESSAGES: Record<Failure, string> = {
 	unavailable: "rtk was not found in PATH",
@@ -227,15 +228,24 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 	});
 
 	/** Mirror the stock RTK Pi hook's rewrite decision without executing the command. */
-	const rewriter =
-		(rtk: string) =>
-		async (command: string): Promise<boolean | undefined> => {
+	const rewriter = (
+		rtk: string,
+		signal: AbortSignal,
+	): ((command: string) => Promise<boolean | undefined>) => {
+		let unavailable = false;
+		return async (command: string): Promise<boolean | undefined> => {
+			if (unavailable || signal.aborted) return undefined;
 			try {
 				// Pass `--` so commands starting with `-` are not parsed as rtk flags.
 				const result = await pi.exec(rtk, ["rewrite", "--", command], {
 					timeout: REWRITE_TIMEOUT_MS,
+					signal,
 				});
-				if (result.killed) return undefined;
+				if (signal.aborted || result.killed) return undefined;
+				if (!result.stdout && MISSING_RTK.test(result.stderr)) {
+					unavailable = true;
+					return undefined;
+				}
 				if (result.code !== 0 && result.code !== 3) return false;
 				const rewritten = result.stdout.trim();
 				return rewritten !== "" && rewritten !== command;
@@ -243,6 +253,7 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 				return undefined;
 			}
 		};
+	};
 
 	pi.registerCommand("rtk-coverage", {
 		description:
@@ -251,11 +262,13 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 			args: string,
 			ctx: ExtensionCommandContext,
 		): Promise<void> => {
+			const signal = lifetime.signal;
 			const parsed = parseCoverageArgs(args);
 			if (!parsed.ok) {
-				show(ctx, parsed.message, "error");
+				if (!signal.aborted) show(ctx, parsed.message, "error");
 				return;
 			}
+			if (signal.aborted) return;
 			const { options } = parsed;
 			const since = windowStart(options.days);
 			try {
@@ -264,15 +277,21 @@ export default function rtkPiExtended(pi: ExtensionAPI): void {
 					options.scope,
 					since,
 				);
+				if (signal.aborted) return;
 				const scan = await scanSessions(files, since);
+				if (signal.aborted) return;
 				// Resolve rtk from PATH once per report, leaving commands unclassified when absent.
 				const rtk = resolveExecutable("rtk");
 				const bash = await classifyBash(
 					scan.bashCommands,
-					rtk ? rewriter(rtk) : async (): Promise<undefined> => undefined,
+					rtk
+						? rewriter(rtk, signal)
+						: async (): Promise<undefined> => undefined,
 				);
+				if (signal.aborted) return;
 				show(ctx, formatReport(options, scan, bash), "info");
 			} catch (error: unknown) {
+				if (signal.aborted) return;
 				const reason = error instanceof Error ? error.message : String(error);
 				show(
 					ctx,

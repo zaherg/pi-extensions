@@ -13,7 +13,14 @@ import {
 	parseEntry,
 	type Tally,
 } from "./outcomes.ts";
-import { categoryFor, isRtkWrapped, MIN_BYTES } from "./policy.ts";
+import {
+	categoryFor,
+	isRtkWrapped,
+	MIN_BYTES,
+	SHELL_PREFIX,
+	SHELL_PREFIX_FLAGS_WITH_ARG,
+	SHELL_SETUP,
+} from "./policy.ts";
 
 const DEFAULT_DAYS = 30;
 const MAX_DAYS = 365;
@@ -27,37 +34,6 @@ const DAY_MS = 86_400_000;
 const MAX_SESSION_DEPTH = 4;
 // Subagent transcript artifacts duplicate session tool results and are not Pi sessions.
 const IGNORED_DIRS = new Set(["subagent-artifacts"]);
-// Leading shell setup commands skipped when identifying the real program run.
-const SETUP_COMMANDS = new Set([
-	"cd",
-	"set",
-	"export",
-	"unset",
-	"umask",
-	"pushd",
-	"popd",
-	"shopt",
-	"source",
-	".",
-	"trap",
-	"true",
-	":",
-]);
-// Leading command prefixes inside a single segment such as `env FOO=1 node` or `time npm`.
-const PREFIX_COMMANDS = new Set([
-	"env",
-	"time",
-	"command",
-	"exec",
-	"nohup",
-	"nice",
-]);
-// Prefix flags that consume the following word as their own argument.
-const PREFIX_FLAGS_WITH_ARG: Readonly<Record<string, ReadonlySet<string>>> = {
-	env: new Set(["-u", "-C", "-S", "--unset", "--chdir", "--split-string"]),
-	nice: new Set(["-n", "--adjustment"]),
-	exec: new Set(["-a"]),
-};
 
 export type Scope = "project" | "all";
 
@@ -356,13 +332,13 @@ function segmentProgram(segment: string): string | undefined {
 				prefix = undefined;
 				continue;
 			}
-			if (PREFIX_FLAGS_WITH_ARG[prefix]?.has(word)) skipNextArg = true;
+			if (SHELL_PREFIX_FLAGS_WITH_ARG[prefix]?.has(word)) skipNextArg = true;
 			continue;
 		}
 		prefix = undefined;
 		const name = word.slice(word.lastIndexOf("/") + 1);
 		fallback ??= name;
-		if (PREFIX_COMMANDS.has(name)) {
+		if (SHELL_PREFIX.has(name)) {
 			prefix = name;
 			continue;
 		}
@@ -381,7 +357,7 @@ function program(command: string): string {
 		const name = segmentProgram(segment);
 		if (name === undefined || name === "''") continue;
 		fallback ??= name;
-		if (!SETUP_COMMANDS.has(name)) return name;
+		if (!SHELL_SETUP.has(name)) return name;
 	}
 	return fallback ?? "?";
 }
