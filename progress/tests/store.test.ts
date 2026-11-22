@@ -15,6 +15,12 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
+import type {
+	ExtensionAPI,
+	ExtensionToolContext,
+	ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+import progressExtension from "../index.ts";
 import {
 	applyProgressUpdates,
 	errorResult,
@@ -349,5 +355,49 @@ describe("progress/store", () => {
 		assert.equal(results.filter((r) => r.code === 0).length, 1);
 		assert.equal(results.filter((r) => r.code === 1).length, 4);
 		assert.deepEqual(await readdir(dirname(started.path)), ["progress.json"]);
+	});
+
+	test("redacts externally written credentials when the model-facing progress tool reads progress.json", async () => {
+		const env = { ...process.env, HOME: homeDir };
+		await spawnCli(["--cwd", projectDir], '{"action":"start"}', env);
+		const written = await spawnCli(
+			["--cwd", projectDir],
+			JSON.stringify({
+				action: "add_task",
+				expected_revision: 0,
+				title: "Deploy token Bearer eyJhbGciOiJIUzI1NiJ9.cli_bearer_secret",
+				description: 'Config has apiKey="cli_apikey_secret_value"',
+				steps: ["Rotate ghp_1234567890abcdefghijklmnop"],
+			}),
+			env,
+		);
+		assert.equal(written.code, 0);
+
+		let registeredTool: ToolDefinition | undefined;
+		progressExtension({
+			on: () => () => {},
+			registerCommand: () => {},
+			registerTool(tool: ToolDefinition): void {
+				registeredTool = tool;
+			},
+			getSettings: () => ({}),
+			appendEntry: () => {},
+		} as unknown as ExtensionAPI);
+		assert.ok(registeredTool);
+
+		const readOut = await registeredTool.execute(
+			"call-read-1",
+			{ action: "read" },
+			undefined,
+			undefined,
+			{ cwd: projectDir, hasUI: false } as unknown as ExtensionToolContext,
+		);
+		const serialized = JSON.stringify(readOut);
+		assert.equal(serialized.includes("cli_bearer_secret"), false);
+		assert.equal(serialized.includes("cli_apikey_secret_value"), false);
+		assert.equal(
+			serialized.includes("ghp_1234567890abcdefghijklmnop"),
+			false,
+		);
 	});
 });

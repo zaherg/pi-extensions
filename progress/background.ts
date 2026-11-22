@@ -11,7 +11,11 @@ import type {
 	ModelRegistry,
 	SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { redactSecrets, stripUnsafeText } from "../shared/display.ts";
+import {
+	redactSecrets,
+	sliceUtf16Head,
+	stripUnsafeText,
+} from "../shared/display.ts";
 import {
 	applyProgressUpdates,
 	errorResult,
@@ -166,11 +170,7 @@ export function projectConversation(
 		if (!text.trim()) continue;
 		const limit = Math.min(6000, remaining);
 		if (text.length > limit) truncated = true;
-		const raw = text.slice(0, limit);
-		const last = raw.charCodeAt(raw.length - 1);
-		const selected = (
-			last >= 0xd800 && last <= 0xdbff ? raw.slice(0, -1) : raw
-		).toWellFormed();
+		const selected = sliceUtf16Head(text, limit);
 		messages.unshift({ id: entry.id, role: message.role, text: selected });
 		remaining -= selected.length;
 	}

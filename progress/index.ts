@@ -70,6 +70,29 @@ function sanitizeProgressInput(params: ProgressToolInput): ProgressToolInput {
 	};
 }
 
+function sanitizeProgressResult(result: ProgressResult): ProgressResult {
+	if (!result.document) return result;
+	return {
+		...result,
+		document: {
+			...result.document,
+			tasks: result.document.tasks.map((task: Task) => ({
+				...task,
+				title: sanitizeField(task.title),
+				description: sanitizeField(task.description),
+				steps: task.steps.map((step: Step) => ({
+					...step,
+					description: sanitizeField(step.description),
+					blocked_by:
+						typeof step.blocked_by === "string"
+							? sanitizeField(step.blocked_by)
+							: null,
+				})),
+			})),
+		},
+	};
+}
+
 function summary(document: ProgressDocument): string {
 	const steps = document.tasks.flatMap((task: Task) => task.steps);
 	return `${document.tasks.length} tasks; ${steps.filter((step: Step) => step.status === "completed").length}/${steps.length} steps completed; ${steps.filter((step: Step) => step.status === "blocked").length} blocked; revision ${document.revision}.`;
@@ -137,10 +160,11 @@ export default function progressExtension(pi: ExtensionAPI): void {
 						"Use /progress start to enable tracking.",
 					);
 				const sanitized = sanitizeProgressInput(params);
-				const result = await withFileMutationQueue(
+				const rawResult = await withFileMutationQueue(
 					await progressPath(cwd),
 					() => runProgress(cwd, sanitized, signal),
 				);
+				const result = sanitizeProgressResult(rawResult);
 				const output = truncateHead(JSON.stringify(result));
 				const text =
 					output.content +

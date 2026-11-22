@@ -1,6 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
 
-// Redact common credential patterns in display and model-facing text.
 export function redactSecrets(text: string): string {
 	return text
 		.replace(
@@ -21,7 +20,15 @@ export function redactSecrets(text: string): string {
 			"$1[REDACTED]",
 		)
 		.replace(
-			/\b(?:sk-[A-Za-z0-9_-]{16,}|(?:sk|rk)_live_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{16,}|(?:AKIA|ASIA)[A-Z0-9]{16}|AGE-SECRET-KEY-1[A-Z0-9]{58})\b/g,
+			/((?:password|passwd|passphrase|secret|token|(?:api|access|private|signing|master|encryption|client)[_-]?key)[A-Z0-9_-]{0,64}(?:\\*["'])?[ \t]*[=:][ \t]*\n[ \t]*)(?:"(?:[^"\\\n]|\\[^\n])*(?:"|\\?(?=\n|$))|'(?:[^'\\\n]|\\[^\n])*(?:'|\\?(?=\n|$))|\[REDACTED\])/gi,
+			"$1[REDACTED]",
+		)
+		.replace(
+			/((?:password|passwd|passphrase|secret|token|(?:api|access|private|signing|master|encryption|client)[_-]?key)[A-Z0-9_-]{0,64}(?:\\*["'])?[ \t]*[=:][ \t]*\n[ \t]+)(?:\[REDACTED\]|(?![A-Za-z0-9_.-]+[ \t]*[=:])(?!\[[ \t]*\])[^\s,;"'\\})\]>]+)/gi,
+			"$1[REDACTED]",
+		)
+		.replace(
+			/\b(?:sk-[A-Za-z0-9_-]{16,}|(?:sk|rk)_live_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{16,}|(?:AKIA|ASIA)[A-Za-z0-9]{16}|AGE-SECRET-KEY-1[A-Z0-9]{58})\b/g,
 			"[REDACTED]",
 		)
 		.replace(
@@ -30,7 +37,6 @@ export function redactSecrets(text: string): string {
 		);
 }
 
-/** Strip terminal escape sequences and unsafe control or format characters, preserving newlines and tabs. */
 export function stripUnsafeText(text: string): string {
 	return stripVTControlCharacters(text)
 		.replace(/\r\n?/g, "\n")
@@ -39,8 +45,7 @@ export function stripUnsafeText(text: string): string {
 		);
 }
 
-// Strip terminal control characters and redact credentials for display.
-function clean(text: string): string {
+function sanitizeDisplayText(text: string): string {
 	return redactSecrets(stripUnsafeText(text)).replace(/^\n+/, "").trimEnd();
 }
 
@@ -53,34 +58,38 @@ const trimTrailHigh = (s: string): string => {
 	return code >= 0xd800 && code <= 0xdbff ? s.slice(0, -1) : s;
 };
 
+export function sliceUtf16Head(text: string, maxChars: number): string {
+	if (maxChars <= 0) return "";
+	if (text.length <= maxChars) return text.toWellFormed();
+	return trimTrailHigh(text.slice(0, maxChars)).toWellFormed();
+}
+
 export function displayLabel(text: string, limit: number): string {
 	const bounded =
 		text.length > 16_384 ? text.slice(0, 16_384).replace(/\S+$/u, "") : text;
 	const stripped = stripUnsafeText(bounded);
-	// Redact PEM blocks before the 1024-char slice so headless keys with a later END marker cannot leak.
 	const source = stripped.includes("PRIVATE KEY")
 		? redactSecrets(stripped)
 		: stripped;
-	// Drop a trailing partial word that might lack a credential's identifying suffix.
 	const head =
 		source.length > 1024 ? source.slice(0, 1024).replace(/\S+$/u, "") : source;
-	const label = redactSecrets(head).replace(/\s+/gu, " ").trim();
+	const collapsed = redactSecrets(head).replace(/\s+/gu, " ").trim();
+	const label = redactSecrets(collapsed);
 	const wasCut = text.length > 16_384 || source.length > 1024;
 	if (!label) {
 		return wasCut && redactSecrets(source).trim() ? "…" : "";
 	}
 	return label.length > limit || wasCut
-		? `${trimTrailHigh(label.slice(0, Math.max(0, limit - 1))).toWellFormed()}…`
+		? `${sliceUtf16Head(label, Math.max(0, limit - 1))}…`
 		: label.toWellFormed();
 }
 
 export function displayTail(text: string, cut: boolean, empty: string): string {
 	if (cut) {
-		// Drop a partial first line that might lack a credential's identifying prefix.
 		const newline = text.indexOf("\n");
 		text = newline < 0 ? "" : text.slice(newline + 1);
 	}
-	text = clean(text);
+	text = sanitizeDisplayText(text);
 	const lines = text.split("\n");
 	const joined = lines.slice(-20).join("\n");
 	const truncated = cut || lines.length > 20 || text.length > 4000;

@@ -13,6 +13,8 @@ describe("redactSecrets", () => {
 			"Short lookalikes: sk-short123 ghp_tooshort AKIA12345678901",
 			"https://example.com/path/user@host",
 			'{"url":"https://example.com","email":"a@b.com"}',
+			"API_KEY=\nNEXT_LINE=ok",
+			"secret:\n  nested_key: ok",
 		];
 		for (const sample of samples) {
 			assert.equal(redactSecrets(sample), sample);
@@ -45,7 +47,7 @@ describe("redactSecrets", () => {
 		);
 	});
 
-	it("redacts Bearer/Basic headers, key-value credentials, JSON-escaped quotes, and long-prefixed keys", () => {
+	it("redacts Bearer/Basic headers, key-value credentials, JSON-escaped quotes, multiline values, and long-prefixed keys", () => {
 		assert.equal(
 			redactSecrets(
 				"Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abc_123-def~456+789/0==",
@@ -68,6 +70,16 @@ describe("redactSecrets", () => {
 			redactSecrets('{"tokens": ["tok-1", "tok-2"], "count": 2}'),
 			'{"tokens": [REDACTED], "count": 2}',
 		);
+		const multilineJson = '{\n  "apiKey":\n    "super-secret-value-12345"\n}';
+		const redactedMultilineJson = redactSecrets(multilineJson);
+		assert.equal(redactedMultilineJson, '{\n  "apiKey":\n    [REDACTED]\n}');
+		assert.equal(redactSecrets(redactedMultilineJson), redactedMultilineJson);
+
+		const multilineYaml = "api_key:\n  unquoted_yaml_secret_99\nnext_key: ok";
+		const redactedMultilineYaml = redactSecrets(multilineYaml);
+		assert.equal(redactedMultilineYaml, "api_key:\n  [REDACTED]\nnext_key: ok");
+		assert.equal(redactSecrets(redactedMultilineYaml), redactedMultilineYaml);
+
 		assert.equal(
 			redactSecrets(
 				String.raw`{\"password\":\"sec\\\"ret\\\\val\",\"user\":\"alice\"}`,
@@ -133,7 +145,7 @@ describe("redactSecrets", () => {
 });
 
 describe("displayLabel and displayTail", () => {
-	it("strips ANSI/control chars, redacts ANSI-interleaved secrets and headless PEMs, and truncates safely", () => {
+	it("strips ANSI/control chars, redacts ANSI-interleaved and multiline secrets and headless PEMs, and truncates safely", () => {
 		assert.equal(
 			displayLabel("\x1b[32mhello\x1b[0m\r\n\t \u200bworld\x07", 80),
 			"hello world",
@@ -141,6 +153,10 @@ describe("displayLabel and displayTail", () => {
 		assert.equal(
 			displayLabel("Authorization: Bearer \x1b[31msecretTok123\x1b[0m", 80),
 			"Authorization: Bearer [REDACTED]",
+		);
+		assert.equal(
+			displayLabel('{\n  "apiKey":\n    "super-secret-value-12345"\n}', 80),
+			'{ "apiKey": [REDACTED] }',
 		);
 		const headlessPem = `${"MIIEpAIBAAKCAQEA".repeat(80)}\n-----END RSA PRIVATE \x1b[31mK\x1b[0mEY-----\nafter`;
 		assert.ok(!displayLabel(headlessPem, 120).includes("MIIEpAIBAAKCAQEA"));

@@ -1,20 +1,18 @@
 import { homedir } from "node:os";
 import { basename, isAbsolute, resolve } from "node:path";
+import { sliceUtf16Head } from "../shared/display.ts";
 
 /** Pi read continuation notice appended after a blank line. */
 const READ_NOTICE =
 	/\n\n(\[(?:Showing lines \d+-\d+ of \d+(?: \([^)\n]*\))?|\d+ more lines in file)\. Use offset=\d+ to continue\.\])$/;
 
-/** File lines shown by a read result, separated from Pi's continuation notice. */
 export interface ReadView {
-	/** 1-based line number of the first body line. */
 	start: number;
 	body: string;
 	lines: string[];
 	notice?: string;
 }
 
-/** Parse raw Pi read output into numbered lines and an optional continuation notice. */
 export function parseReadView(
 	text: string,
 	offset: unknown,
@@ -38,7 +36,6 @@ export function parseReadView(
 const BASH_TRAILER =
 	/\n\n((?:\[Showing [^\n]*\. Full output: [^\n]+\])(?:\n\nCommand exited with code \d+)?|Command exited with code \d+)$/;
 
-/** Split Bash output into body text and any trailing Pi truncation or exit notice. */
 export function splitBashTrailer(text: string): {
 	body: string;
 	trailer?: string;
@@ -72,7 +69,6 @@ const LOCKFILES = new Set([
 	"go.sum",
 ]);
 
-/** Classify a file path so only non-code formats are condensed. */
 export function fileClass(path: string): FileClass {
 	const name = basename(path);
 	if (LOCKFILES.has(name)) return "lockfile";
@@ -127,7 +123,6 @@ const npm: Extract = (
 	return entry;
 };
 
-/** Extract name and version pairs from Cargo, Poetry, and uv TOML lockfiles. */
 const tomlPackages: Extract = (
 	line: string,
 	state: ExtractState,
@@ -214,7 +209,6 @@ const EXTRACTORS: Record<string, Extract> = {
 
 const MIN_PACKAGES = 3;
 
-/** Extract unique ordered name@version entries visible in a lockfile excerpt. */
 export function lockfilePackages(path: string, text: string): string[] {
 	const extract = EXTRACTORS[basename(path)];
 	if (!extract) return [];
@@ -229,22 +223,17 @@ export function lockfilePackages(path: string, text: string): string[] {
 
 const LONG_LINE = 300;
 
-/** Keep the first 300 characters of each long line with an explicit truncation marker. */
 export function truncateLongLines(text: string): string {
 	return text
 		.split("\n")
 		.map((line: string): string => {
 			if (line.length <= LONG_LINE) return line.toWellFormed();
-			let head = line.slice(0, LONG_LINE);
-			const last = head.charCodeAt(head.length - 1);
-			if (last >= 0xd800 && last <= 0xdbff) head = head.slice(0, -1);
-			head = head.toWellFormed();
+			const head = sliceUtf16Head(line, LONG_LINE);
 			return `${head}…[+${line.length - head.length} chars]`;
 		})
 		.join("\n");
 }
 
-/** Strip leading line indentation safely from JSON text or excerpts. */
 export function stripJsonIndentation(text: string): string {
 	return text.replace(/^[ \t]+/gm, "");
 }
@@ -263,7 +252,6 @@ function unquote(token: string): string {
 	return /^(['"]).*\1$/.test(token) ? token.slice(1, -1) : token;
 }
 
-/** Return the resolved file path when a Bash command only prints a single file. */
 export function bashFileView(command: string, cwd: string): string | undefined {
 	const trimmed = command.trim();
 	for (const pattern of VIEW_COMMANDS) {
