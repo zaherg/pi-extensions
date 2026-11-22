@@ -39,10 +39,12 @@ To test individual extensions directly from a local checkout without installing 
 pi -e ./trace/index.ts -e ./worker-board/index.ts
 ```
 
-To typecheck and lint a local checkout without installing `node_modules` (running `tsc --noEmit` against local `./node_modules` when present or the installed Pi release in `~/.pi/agent/install`, followed by `biome lint --error-on-warnings`):
+To typecheck, lint, and run the full test suite on a local checkout without installing `node_modules` (resolving Pi packages from local `./node_modules` when present or the installed Pi release in `~/.pi/agent/install`, followed by `biome lint --error-on-warnings` and `npm test`):
 
 ```sh
 npm run check
+# or run only the Node.js test suite:
+npm test
 ```
 
 ### Important notes
