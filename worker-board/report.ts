@@ -36,9 +36,32 @@ function inferStatus(
 	phase: Phase,
 ): WorkerStatus | undefined {
 	if (knownStatus(raw.status)) return raw.status;
+	const state = typeof raw.state === "string" ? raw.state.toLowerCase() : "";
+	const stop =
+		typeof raw.stopReason === "string" ? raw.stopReason.toLowerCase() : "";
+	if (
+		stop === "aborted" ||
+		state === "aborted" ||
+		state === "stopped" ||
+		state === "cancelled" ||
+		state === "canceled"
+	)
+		return "aborted";
+	if (state === "blocked") return "blocked";
 	if (typeof raw.exitCode === "number")
 		return raw.exitCode === 0 ? "completed" : "failed";
-	if (phase === "live") return "running";
+	if (stop === "error" || state === "failed" || state === "error")
+		return "failed";
+	if (
+		state === "completed" ||
+		state === "complete" ||
+		state === "succeeded" ||
+		state === "done"
+	)
+		return "completed";
+	if (state === "pending" || state === "queued") return "pending";
+	if (phase === "live" || state === "running" || state === "active")
+		return "running";
 	return undefined;
 }
 
@@ -98,22 +121,115 @@ export function workerRows(
 	}
 	if (!details.results.length) {
 		if (details.mode === "workflow") {
-			const wfState =
-				record(details.workflowChildren) &&
-				typeof details.workflowChildren.workflowState === "string"
-					? displayLabel(details.workflowChildren.workflowState, 24)
+			const wfContainer = record(details.workflowChildren)
+				? details.workflowChildren
+				: undefined;
+			const wfChildren: unknown[] = Array.isArray(details.workflowChildren)
+				? details.workflowChildren
+				: Array.isArray(wfContainer?.children)
+					? wfContainer.children
+					: [];
+			const wfMeta = record(details.workflow) ? details.workflow : undefined;
+			const wfStateRaw = (
+				typeof wfContainer?.workflowState === "string"
+					? wfContainer.workflowState
+					: typeof wfMeta?.state === "string"
+						? wfMeta.state
+						: ""
+			).toLowerCase();
+			const failureKind =
+				typeof wfMeta?.failureKind === "string"
+					? displayLabel(wfMeta.failureKind, 32)
 					: "";
-			const statusKey =
-				phase === "failed" || wfState === "failed"
-					? "failed"
-					: phase === "live" ||
-							wfState === "running" ||
-							typeof details.asyncId === "string"
-						? "running"
-						: "completed";
+			const stopCause =
+				typeof wfMeta?.stopCause === "string"
+					? displayLabel(wfMeta.stopCause, 32)
+					: "";
+			if (wfChildren.length > 0) {
+				let reportedFailure = false;
+				const childRows = wfChildren.map((c: unknown, i: number): Row => {
+					const slot = `${ref}/${i + 1}`;
+					if (!record(c))
+						return { priority: 1, text: `${slot} Unsupported worker report.` };
+					const agent =
+						(typeof c.agent === "string" && displayLabel(c.agent, 32)) ||
+						(typeof c.childId === "string" && displayLabel(c.childId, 32)) ||
+						"";
+					const statusKey = inferStatus(c, phase);
+					if (!agent || !statusKey)
+						return { priority: 1, text: `${slot} Unsupported worker report.` };
+					if (statusKey === "failed" || statusKey === "aborted")
+						reportedFailure = true;
+					const taskLabel =
+						typeof c.sessionName === "string"
+							? displayLabel(c.sessionName, 64)
+							: "";
+					const last =
+						(typeof c.currentTool === "string" &&
+							displayLabel(c.currentTool, 32)) ||
+						lastTool(c.messages, c.toolCalls);
+					const status =
+						phase !== "live" &&
+						(statusKey === "running" || statusKey === "pending")
+							? `last reported ${statusKey}`
+							: statusKey;
+					return {
+						priority: priority[statusKey],
+						text: [
+							`${status} ${agent} ${slot}`,
+							taskLabel,
+							last && `last: ${last}`,
+						]
+							.filter(Boolean)
+							.join(" · "),
+					};
+				});
+				if (
+					(phase === "failed" || failureKind || wfStateRaw === "failed") &&
+					!reportedFailure
+				) {
+					childRows.unshift(
+						note(
+							failureKind
+								? `Workflow failed (${failureKind}).`
+								: "Workflow failed.",
+							0,
+						),
+					);
+				}
+				return childRows;
+			}
+			let statusKey: WorkerStatus;
+			if (
+				phase === "failed" ||
+				wfStateRaw === "failed" ||
+				wfStateRaw === "error" ||
+				failureKind
+			) {
+				statusKey = "failed";
+			} else if (
+				wfStateRaw === "aborted" ||
+				wfStateRaw === "stopped" ||
+				wfStateRaw === "cancelled" ||
+				wfStateRaw === "canceled" ||
+				stopCause
+			) {
+				statusKey = "aborted";
+			} else if (
+				phase === "live" ||
+				wfStateRaw === "running" ||
+				wfStateRaw === "active" ||
+				typeof details.asyncId === "string"
+			) {
+				statusKey = "running";
+			} else if (wfStateRaw === "pending" || wfStateRaw === "queued") {
+				statusKey = "pending";
+			} else {
+				statusKey = "completed";
+			}
 			const statusLabel =
-				phase !== "live" && statusKey === "running"
-					? "last reported running"
+				phase !== "live" && (statusKey === "running" || statusKey === "pending")
+					? `last reported ${statusKey}`
 					: statusKey;
 			const name =
 				displayLabel(
@@ -126,17 +242,54 @@ export function workerRows(
 				record(args) && typeof args.mission === "string"
 					? displayLabel(args.mission, 64)
 					: "";
+			const reasonTag = failureKind
+				? `failure: ${failureKind}`
+				: stopCause
+					? `stopped: ${stopCause}`
+					: "";
 			const asyncTag = typeof details.asyncId === "string" ? "async" : "";
 			return [
 				{
 					priority: priority[statusKey],
-					text: [`${statusLabel} ${name} ${ref}`, mission, asyncTag]
+					text: [`${statusLabel} ${name} ${ref}`, mission, reasonTag, asyncTag]
 						.filter(Boolean)
 						.join(" · "),
 				},
 			];
 		}
 		if (typeof details.asyncId === "string") {
+			const statusLabel =
+				phase === "failed"
+					? "failed"
+					: phase === "live"
+						? "running (async)"
+						: "last reported async";
+			const rowPriority = phase === "failed" ? 0 : priority.running;
+			const asyncBatch: unknown[] | undefined = record(args)
+				? details.mode === "chain" && Array.isArray(args.chain)
+					? args.chain
+					: details.mode === "parallel" && Array.isArray(args.tasks)
+						? args.tasks
+						: undefined
+				: undefined;
+			if (asyncBatch?.length) {
+				return asyncBatch.map((item: unknown, i: number): Row => {
+					const agent =
+						(record(item) && typeof item.agent === "string"
+							? displayLabel(item.agent, 32)
+							: "") || "worker";
+					const task =
+						record(item) && typeof item.task === "string"
+							? displayLabel(item.task, 64)
+							: "";
+					return {
+						priority: rowPriority,
+						text: [`${statusLabel} ${agent} ${ref}/${i + 1}`, task]
+							.filter(Boolean)
+							.join(" · "),
+					};
+				});
+			}
 			const agent =
 				(record(args) && typeof args.agent === "string"
 					? displayLabel(args.agent, 32)
@@ -145,15 +298,9 @@ export function workerRows(
 				record(args) && typeof args.task === "string"
 					? displayLabel(args.task, 64)
 					: "";
-			const statusLabel =
-				phase === "failed"
-					? "failed"
-					: phase === "live"
-						? "running (async)"
-						: "last reported async";
 			return [
 				{
-					priority: phase === "failed" ? 0 : priority.running,
+					priority: rowPriority,
 					text: [`${statusLabel} ${agent} ${ref}`, task]
 						.filter(Boolean)
 						.join(" · "),
@@ -257,7 +404,7 @@ export function latestBatch(entries: readonly SessionEntry[]): Row[] {
 	>();
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		if (!entry || entry.type !== "message") continue;
+		if (entry?.type !== "message") continue;
 		const msg = entry.message;
 		if (
 			msg.role === "toolResult" &&
