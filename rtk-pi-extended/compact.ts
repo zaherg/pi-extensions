@@ -118,17 +118,54 @@ const MAX_SUFFIX = 400;
 const MIN_REPEATS = 3;
 const MAX_FOOTNOTES = 3;
 const MAX_LINES = 5_000;
-const FENCE = /^`{3,}/;
+export interface FenceState {
+	readonly char: "`" | "~";
+	readonly length: number;
+}
 
-function unfencedMask(lines: readonly string[]): boolean[] {
-	let inFence = false;
-	return lines.map((line: string): boolean => {
-		if (FENCE.test(line)) {
-			inFence = !inFence;
-			return false;
+const FENCE_CANDIDATE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
+/** Advance CommonMark fenced-code state across a single line. */
+export function stepFenceLine(
+	line: string,
+	open: FenceState | undefined,
+): { next: FenceState | undefined; transition: "open" | "close" | "none" } {
+	const match = FENCE_CANDIDATE.exec(line);
+	const marker = match?.[1];
+	const rest = match?.[2] ?? "";
+	if (!marker) return { next: open, transition: "none" };
+	const char: "`" | "~" = marker[0] === "~" ? "~" : "`";
+	if (!open) {
+		if (char === "`" && rest.includes("`")) {
+			return { next: undefined, transition: "none" };
 		}
-		return !inFence;
+		return {
+			next: { char, length: marker.length },
+			transition: "open",
+		};
+	}
+	if (
+		char === open.char &&
+		marker.length >= open.length &&
+		/^[ \t]*$/.test(rest)
+	) {
+		return { next: undefined, transition: "close" };
+	}
+	return { next: open, transition: "none" };
+}
+
+function unfencedMask(lines: readonly string[]): {
+	eligible: boolean[];
+	unclosed: boolean;
+} {
+	let open: FenceState | undefined;
+	const eligible = lines.map((line: string): boolean => {
+		const { next, transition } = stepFenceLine(line, open);
+		open = next;
+		if (transition !== "none") return false;
+		return open === undefined;
 	});
+	return { eligible, unclosed: open !== undefined };
 }
 
 function bestSuffix(
@@ -196,7 +233,8 @@ export function unfactorSuffixes(text: string): string {
 export function factorSuffixes(text: string): string | undefined {
 	if (text.includes("[^")) return undefined;
 	let lines = text.split("\n");
-	const eligible = unfencedMask(lines);
+	const { eligible, unclosed } = unfencedMask(lines);
+	if (unclosed) return undefined;
 	const notes: string[] = [];
 	for (let label = 1; label <= MAX_FOOTNOTES; label++) {
 		const suffix = bestSuffix(lines, eligible);

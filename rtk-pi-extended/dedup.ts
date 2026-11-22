@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
+import { type FenceState, stepFenceLine } from "./compact.ts";
 import { type ReadView, resolvePath } from "./views.ts";
 
 /** Model-visible tool result text keyed by tool call ID after compaction and context edits. */
@@ -117,44 +118,120 @@ export class ReadIndex {
 /** Minimum byte length required before a passage can be deduplicated. */
 export const MIN_PASSAGE_BYTES = 256;
 const MAX_PASSAGES = 50_000;
-const FENCE_LINE = /^`{3,}/gm;
-const LEAD_FENCE = /^(`{3,}[^\n]*\n)([\s\S]+)$/;
-const TAIL_FENCE = /^([\s\S]+)(\n`{3,}[ \t]*)$/;
-const BOTH_FENCES = /^(`{3,}[^\n]*\n)([\s\S]+)(\n`{3,}[ \t]*)$/;
 const FILE_HEADING = /^\*\*`([^`\n]+)`\*\*/;
 const NUMBERED_EXCERPT_LINE = /^(\d+)\t(.*)$/;
 
-interface UnwrappedPassage {
+interface FenceTransition {
+	index: number;
+	kind: "open" | "close";
+}
+
+interface InspectedPart {
 	lead: string;
 	core: string;
 	tail: string;
 	balanced: boolean;
+	openAfter: FenceState | undefined;
+	coreInFence: boolean;
 }
 
-/** Detach outer Markdown code fences from a passage so omitting it never breaks fence balance. */
-function unwrapPassageFences(part: string): UnwrappedPassage {
-	const fences = part.match(FENCE_LINE)?.length ?? 0;
-	if (fences === 0) return { lead: "", core: part, tail: "", balanced: true };
-	if (fences === 1) {
-		const open = LEAD_FENCE.exec(part);
-		if (open?.[1] !== undefined && open[2] !== undefined)
-			return { lead: open[1], core: open[2], tail: "", balanced: true };
-		const close = TAIL_FENCE.exec(part);
-		if (close?.[1] !== undefined && close[2] !== undefined)
-			return { lead: "", core: close[1], tail: close[2], balanced: true };
-		return { lead: "", core: part, tail: "", balanced: false };
+/** Track CommonMark fence state across a paragraph and detach outer fences so omission preserves balance. */
+function inspectPartFences(
+	part: string,
+	openBefore: FenceState | undefined,
+): InspectedPart {
+	const lines = part.split("\n");
+	let open = openBefore;
+	const transitions: FenceTransition[] = [];
+	for (let index = 0; index < lines.length; index++) {
+		const { next, transition } = stepFenceLine(lines[index] ?? "", open);
+		open = next;
+		if (transition !== "none") {
+			transitions.push({ index, kind: transition });
+		}
 	}
-	if (fences === 2) {
-		const both = BOTH_FENCES.exec(part);
-		if (
-			both?.[1] !== undefined &&
-			both[2] !== undefined &&
-			both[3] !== undefined
-		)
-			return { lead: both[1], core: both[2], tail: both[3], balanced: true };
-		return { lead: "", core: part, tail: "", balanced: true };
+	if (transitions.length === 0) {
+		return {
+			lead: "",
+			core: part,
+			tail: "",
+			balanced: true,
+			openAfter: open,
+			coreInFence: openBefore !== undefined,
+		};
 	}
-	return { lead: "", core: part, tail: "", balanced: fences % 2 === 0 };
+	if (
+		openBefore === undefined &&
+		transitions.length === 1 &&
+		transitions[0]?.kind === "open" &&
+		transitions[0].index === 0 &&
+		lines.length >= 2
+	) {
+		return {
+			lead: `${lines[0] ?? ""}\n`,
+			core: lines.slice(1).join("\n"),
+			tail: "",
+			balanced: true,
+			openAfter: open,
+			coreInFence: true,
+		};
+	}
+	if (
+		openBefore !== undefined &&
+		transitions.length === 1 &&
+		transitions[0]?.kind === "close" &&
+		transitions[0].index === lines.length - 1 &&
+		lines.length >= 2
+	) {
+		return {
+			lead: "",
+			core: lines.slice(0, -1).join("\n"),
+			tail: `\n${lines[lines.length - 1] ?? ""}`,
+			balanced: true,
+			openAfter: open,
+			coreInFence: true,
+		};
+	}
+	if (
+		openBefore === undefined &&
+		transitions.length === 2 &&
+		transitions[0]?.kind === "open" &&
+		transitions[0].index === 0 &&
+		transitions[1]?.kind === "close" &&
+		transitions[1].index === lines.length - 1 &&
+		lines.length >= 3
+	) {
+		return {
+			lead: `${lines[0] ?? ""}\n`,
+			core: lines.slice(1, -1).join("\n"),
+			tail: `\n${lines[lines.length - 1] ?? ""}`,
+			balanced: true,
+			openAfter: open,
+			coreInFence: true,
+		};
+	}
+	if (
+		openBefore === undefined &&
+		open === undefined &&
+		transitions.length >= 2
+	) {
+		return {
+			lead: "",
+			core: part,
+			tail: "",
+			balanced: true,
+			openAfter: open,
+			coreInFence: false,
+		};
+	}
+	return {
+		lead: "",
+		core: part,
+		tail: "",
+		balanced: false,
+		openAfter: open,
+		coreInFence: false,
+	};
 }
 
 function digest(tool: string, passage: string): string {
@@ -167,8 +244,10 @@ function digest(tool: string, passage: string): string {
 
 export function passages(text: string): string[] {
 	const found: string[] = [];
+	let openFence: FenceState | undefined;
 	for (const part of text.split("\n\n")) {
-		const { core, balanced } = unwrapPassageFences(part);
+		const { core, balanced, openAfter } = inspectPartFences(part, openFence);
+		openFence = openAfter;
 		if (balanced && Buffer.byteLength(core) >= MIN_PASSAGE_BYTES)
 			found.push(core);
 	}
@@ -223,9 +302,12 @@ export function dedupPassages(
 		out.push(marker(pending.count, pending.bytes, pending.call));
 		pending = undefined;
 	};
+	let openFence: FenceState | undefined;
 	parts.forEach((part: string, position: number): void => {
 		const last = position === parts.length - 1;
-		const { lead, core, tail, balanced } = unwrapPassageFences(part);
+		const { lead, core, tail, balanced, openAfter, coreInFence } =
+			inspectPartFences(part, openFence);
+		openFence = openAfter;
 		const bytes = Buffer.byteLength(core);
 		let call: string | undefined;
 		if (!last && balanced && bytes >= MIN_PASSAGE_BYTES) {
@@ -234,6 +316,7 @@ export function dedupPassages(
 			// Extend the active marker when the same earlier call also contains this passage.
 			if (
 				pending &&
+				!coreInFence &&
 				lead === "" &&
 				tail === "" &&
 				candidates.includes(pending.call) &&
@@ -250,7 +333,7 @@ export function dedupPassages(
 			return;
 		}
 		omitted++;
-		if (lead !== "" || tail !== "") {
+		if (coreInFence || lead !== "" || tail !== "") {
 			flush();
 			out.push(`${lead}${marker(1, bytes, call)}${tail}`);
 		} else if (pending && pending.call === call) {
@@ -293,12 +376,14 @@ export function dedupReadExcerpts(
 	const parts = text.split("\n\n");
 	const out: string[] = [];
 	let omitted = 0;
-	let inFence = false;
+	let openFence: FenceState | undefined;
 	let currentPath: string | undefined;
 	for (const part of parts) {
-		const wasInFence = inFence;
-		const fences = part.match(FENCE_LINE)?.length ?? 0;
-		if (fences % 2 === 1) inFence = !inFence;
+		const wasInFence = openFence !== undefined;
+		const { lead, core, tail, balanced, openAfter, coreInFence } =
+			inspectPartFences(part, openFence);
+		openFence = openAfter;
+		const inFence = openFence !== undefined;
 		if (!wasInFence) {
 			const heading = FILE_HEADING.exec(part)?.[1];
 			if (heading !== undefined) {
@@ -307,9 +392,6 @@ export function dedupReadExcerpts(
 				continue;
 			}
 		}
-		const { lead, core, tail, balanced } = unwrapPassageFences(part);
-		const coreInFence =
-			(wasInFence && lead === "") || (!wasInFence && lead !== "");
 		if (!coreInFence && !wasInFence) currentPath = undefined;
 		if (
 			coreInFence &&
@@ -336,7 +418,7 @@ export function dedupReadExcerpts(
 					out.push(
 						`${lead}[rtk-pi-extended: lines ${view.start}-${end} omitted; identical text is in the read result of tool call ${shared.source.toolCallId} earlier in this conversation]${tail}`,
 					);
-					if (!inFence) currentPath = undefined;
+					if (wasInFence && !inFence) currentPath = undefined;
 					continue;
 				}
 			}
