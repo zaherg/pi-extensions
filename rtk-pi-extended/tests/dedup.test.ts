@@ -3,7 +3,6 @@ import { Buffer } from "node:buffer";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
 import {
-	ANY_START,
 	type ContextResults,
 	dedupPassages,
 	dedupReadExcerpts,
@@ -59,9 +58,12 @@ describe("ReadIndex", () => {
 		assert.deepEqual(index.overlaps("/repo/other.ts", makeView(1, lines)), []);
 	});
 
-	it("tracks markReplaced/forcesFull/ANY_START, invalidates paths, and evicts A -> B -> A reverts & truncated tails", () => {
+	it("tracks markReplaced/markPathReplaced/forcesFull, rejects out-of-band start sentinels, and evicts stale tails", () => {
 		const index = new ReadIndex();
 		const path = "/repo/a.ts";
+
+		index.markReplaced("/repo/zero.ts", 0);
+		assert.equal(index.forcesFull("/repo/zero.ts", 50), false);
 
 		index.markReplaced(path, 50);
 		index.markReplaced(path, 120);
@@ -79,13 +81,16 @@ describe("ReadIndex", () => {
 		assert.equal(index.forcesFull(path, 120), false);
 		assert.equal(index.forcesFull(path, 200), true);
 
-		index.markReplaced(path, ANY_START);
+		index.markPathReplaced(path);
 		assert.equal(index.forcesFull(path, 1), true);
+		assert.equal(index.forcesFull(path, 250), true);
 		index.record(path, "call-clear", makeView(195, Array(10).fill("x")));
 		assert.equal(index.forcesFull(path, 1), false);
 		assert.equal(index.forcesFull(path, 200), false);
 
+		index.markPathReplaced(path);
 		index.invalidate(path);
+		assert.equal(index.forcesFull(path, 1), false);
 		assert.deepEqual(
 			index.overlaps(path, makeView(195, Array(10).fill("x"))),
 			[],

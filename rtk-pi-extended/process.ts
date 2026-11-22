@@ -4,7 +4,6 @@ import type { ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { type Failure, RECALL_HINT, type Result } from "./bridge.ts";
 import { compactJsonDocument, factorSuffixes, groupGrep } from "./compact.ts";
 import {
-	ANY_START,
 	type ContextResults,
 	dedupPassages,
 	dedupReadExcerpts,
@@ -31,7 +30,6 @@ import {
 	truncateLongLines,
 } from "./views.ts";
 
-/** Minimum byte size before JSON indentation is stripped from read excerpts. */
 const LARGE_JSON_BYTES = 16 * 1024;
 // Preserve raw `grep -n` lines on bash so pi-lens can credit search-reads when loaded after us.
 const RAW_GREP_COMMAND = /\b[ef]?grep\b/;
@@ -40,22 +38,17 @@ export type Call = Pick<ToolResultEvent, "toolName" | "toolCallId" | "input">;
 
 export interface Dependencies {
 	cwd: string;
-	/** Fast pre-check returning false when a pipeline rule cannot modify text. */
 	gate: Gate;
-	/** Run RTK's post-tool pipeline for a profile. */
 	rtk: (toolName: string, text: string, pipeline: Pipeline) => Promise<Result>;
 	context: () => ContextResults;
 	reads: ReadIndex;
 	passages: PassageIndex;
-	/** Guard index mutations against mid-flight abort, compaction, or session switches. */
 	canCommit?: () => boolean;
 }
 
 export interface Processed {
-	/** Replacement text, present only for an accepted change. */
 	text?: string;
 	sample: Sample;
-	/** Recoverable RTK failure recorded while keeping safe output. */
 	failure?: Failure;
 }
 
@@ -125,14 +118,12 @@ interface RtkStepResult {
 	failure?: Failure;
 }
 
-/** Build a condensed non-code view prefixed with a warning against direct edits. */
 async function condense(
 	route: Route & { path: string },
 	call: Call,
 	view: ReadView | undefined,
 	deps: Dependencies,
 ): Promise<Condensed | undefined> {
-	// Keep Pi's read continuation or Bash truncation notice verbatim.
 	const { body, trailer: notice } = view
 		? { body: view.body, trailer: view.notice }
 		: splitBashTrailer(route.text);
@@ -167,7 +158,6 @@ async function condense(
 				),
 			};
 		case "json":
-			// Leave small or complete JSON files intact because they are commonly read before editing.
 			if (
 				Buffer.byteLength(body) < LARGE_JSON_BYTES ||
 				(view !== undefined && view.notice === undefined)
@@ -196,7 +186,6 @@ async function condense(
 	}
 }
 
-/** Format a stub referencing an earlier read for shared lines while keeping unique lines verbatim. */
 function readStub(view: ReadView, where: string, shared: Overlap): string {
 	const end = view.start + view.lines.length - 1;
 	const call = shared.source.toolCallId;
@@ -224,14 +213,12 @@ function readStub(view: ReadView, where: string, shared: Overlap): string {
 	);
 }
 
-/** Build a deduplication stub pointing at an earlier model-visible read when worthwhile. */
 function dedupStub(
 	path: string,
 	text: string,
 	view: ReadView,
 	deps: Dependencies,
 ): DedupStub | undefined {
-	// Reference only earlier reads that remain visible in the projected session context.
 	const shared = deps.reads
 		.overlaps(path, view)
 		.find(({ source }: Overlap) =>
@@ -295,7 +282,6 @@ async function processRead(
 	}
 	const stub = view ? dedupStub(path, text, view, deps) : undefined;
 	let best: { text: string; mechanism: string } | undefined = stub;
-	// Check whether a condensed non-code view beats a partial overlap stub.
 	const condensed = stub?.complete
 		? undefined
 		: await condense(route, call, view, deps);
@@ -322,11 +308,14 @@ async function processRead(
 		best = condensed;
 	if (best) {
 		if (canCommit(deps)) {
-			if (view) deps.reads.evictConflicts(path, view);
-			// Mark ANY_START after a Bash file view so reading any range returns exact text.
-			deps.reads.markReplaced(path, view?.start ?? ANY_START);
-			if (view && reqStart !== view.start) {
-				deps.reads.markReplaced(path, reqStart);
+			if (view) {
+				deps.reads.evictConflicts(path, view);
+				deps.reads.markReplaced(path, view.start);
+				if (reqStart !== view.start) {
+					deps.reads.markReplaced(path, reqStart);
+				}
+			} else {
+				deps.reads.markPathReplaced(path);
 			}
 		}
 		return {
@@ -353,7 +342,6 @@ async function processRead(
 	return { sample: sample(call, route, condensed?.mechanism ?? "none", text) };
 }
 
-/** Detach RTK's trailing recall hint only when RTK actually filtered the step. */
 function splitRecallHint(step: RtkStepResult): { body: string; hint: string } {
 	if (step.mechanisms.length === 0) return { body: step.text, hint: "" };
 	const hint = RECALL_HINT.exec(step.text)?.[0] ?? "";
@@ -384,7 +372,6 @@ async function runRtkStep(
 		: { text: route.text, mechanisms: [] };
 }
 
-/** Return true when a rewrite reduces UTF-8 byte length. */
 function shrinks(before: string, after: string): boolean {
 	return Buffer.byteLength(after) < Buffer.byteLength(before);
 }
@@ -422,7 +409,6 @@ async function processTerminal(
 	call: Call,
 	deps: Dependencies,
 ): Promise<Processed | undefined> {
-	// Skip spawning RTK on wrapped commands unless raw terminal noise or >300-line output passed through.
 	const allowRtk =
 		!route.wrapped ||
 		hasRawTerminalOutput(route.text) ||
@@ -600,7 +586,6 @@ async function processGeneric(
 	return processed;
 }
 
-/** Process one routed tool result and fall back to the original on RTK failure. */
 export async function processRoute(
 	route: Route,
 	call: Call,

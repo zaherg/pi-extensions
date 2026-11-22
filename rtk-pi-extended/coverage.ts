@@ -78,7 +78,6 @@ export interface Scan {
 	unreadableLines: number;
 	invalidEntries: number;
 	tools: Map<string, Usage>;
-	/** Delivered bash output keyed by the model-issued command ("" when unknown). */
 	bashCommands: Map<string, Usage>;
 	tallies: Map<string, Tally>;
 }
@@ -156,7 +155,6 @@ async function jsonlFiles(directory: string, depth = 0): Promise<string[]> {
 	}
 }
 
-/** Return session files modified since sinceMs without following symlinks. */
 export async function sessionFiles(
 	sessionDir: string,
 	scope: Scope,
@@ -268,7 +266,6 @@ function scanEntry(
 		scanToolResult(message, sinceMs, commands, scan);
 }
 
-/** Aggregate delivered tool output byte counts and extension outcome tallies across sessions. */
 export async function scanSessions(
 	files: readonly string[],
 	sinceMs: number,
@@ -308,14 +305,12 @@ export async function scanSessions(
 	return scan;
 }
 
-/** Return true when RTK's Pi hook rewrites the command, or undefined when unknown. */
 export type Rewrite = (command: string) => Promise<boolean | undefined>;
 
 export interface BashCoverage {
 	rewritten: Usage;
 	notRewritten: Usage;
 	unclassified: Usage;
-	/** Non-rewritten bash output grouped by leading program name. */
 	programs: Map<string, Usage>;
 }
 

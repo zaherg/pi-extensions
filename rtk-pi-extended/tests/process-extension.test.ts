@@ -15,12 +15,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { Result } from "../bridge.ts";
 import { unfactorSuffixes } from "../compact.ts";
-import {
-	ANY_START,
-	type ContextResults,
-	PassageIndex,
-	ReadIndex,
-} from "../dedup.ts";
+import { type ContextResults, PassageIndex, ReadIndex } from "../dedup.ts";
 import { createGate } from "../gate.ts";
 import rtkPiExtended from "../index.ts";
 import { ENTRY_TYPE, parseEntry } from "../outcomes.ts";
@@ -181,7 +176,7 @@ describe("processRoute — read category", () => {
 		assert.equal(wRetry?.sample.mechanism, "read-forced");
 	});
 
-	it("condenses lockfiles, minified lines, partial/bash JSON, and marks ANY_START on bash file views", async () => {
+	it("condenses lockfiles, minified lines, partial/bash JSON, and marks whole-path replacement on bash file views", async () => {
 		const { deps, reads } = makeDeps();
 		const packages = Array.from({ length: 10 }, (_, i) =>
 			[
@@ -200,7 +195,7 @@ describe("processRoute — read category", () => {
 			deps,
 		);
 		assert.equal(bashLock?.sample.mechanism, "lockfile-summary");
-		assert.equal(reads.forcesFull(lockPath, ANY_START), true);
+		assert.equal(reads.forcesFull(lockPath, 1), true);
 		assert.equal(reads.forcesFull(lockPath, 77), true);
 
 		const minRes = await processRoute(

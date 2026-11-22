@@ -180,7 +180,6 @@ function replacementText(stdout: string): string | undefined {
 	return block.text;
 }
 
-/** Verify that file headings, annotations, and notices still bind numbered lines to their files. */
 export function preservesBoundaries(
 	original: string,
 	filtered: string,
@@ -206,7 +205,6 @@ export function preservesBoundaries(
 
 export type StructureCheck = (original: string, filtered: string) => boolean;
 
-/** Run one text result through RTK's post-tool pipeline and verify recall integrity. */
 export async function filterPosthook(
 	toolName: string,
 	text: string,

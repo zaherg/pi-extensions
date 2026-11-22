@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { type FenceState, stepFenceLine } from "./compact.ts";
 import { type ReadView, resolvePath } from "./views.ts";
 
-/** Model-visible tool result text keyed by tool call ID after compaction and context edits. */
 export type ContextResults = ReadonlyMap<string, string>;
 
 export interface ReadSource {
@@ -14,7 +13,6 @@ export interface ReadSource {
 	body: string;
 }
 
-/** Inclusive file line range shared identically with an earlier verbatim read. */
 export interface Overlap {
 	source: ReadSource;
 	from: number;
@@ -23,10 +21,6 @@ export interface Overlap {
 
 const MAX_INDEXED_CHARS = 16 * 1024 * 1024;
 
-/** Sentinel start line matching reads at any offset after a Bash file view. */
-export const ANY_START = 0;
-
-/** Return the shared line range of a source and view when every overlapping line matches. */
 function overlap(source: ReadSource, view: ReadView): Overlap | undefined {
 	const from = Math.max(source.start, view.start);
 	const to =
@@ -52,14 +46,12 @@ function conflictsWith(source: ReadSource, view: ReadView): boolean {
 	return to >= from && overlap(source, view) === undefined;
 }
 
-/** Verbatim read results delivered in the current session. */
 export class ReadIndex {
 	readonly #sources: ReadSource[] = [];
-	/** Start lines per path whose last delivery was a stub or condensed view. */
 	readonly #replaced = new Map<string, Set<number>>();
+	readonly #replacedPaths = new Set<string>();
 	#chars = 0;
 
-	/** Evict earlier reads of path whose overlapping lines changed outside edit/write. */
 	evictConflicts(path: string, view: ReadView): void {
 		for (let index = this.#sources.length - 1; index >= 0; index--) {
 			const source = this.#sources[index];
@@ -69,7 +61,6 @@ export class ReadIndex {
 		}
 	}
 
-	/** Record a verbatim read and clear any forced re-read marker for its range. */
 	record(
 		path: string,
 		toolCallId: string,
@@ -77,11 +68,11 @@ export class ReadIndex {
 		requestedStart?: number,
 	): void {
 		this.evictConflicts(path, view);
+		this.#replacedPaths.delete(path);
 		const replaced = this.#replaced.get(path);
 		if (replaced) {
 			const end = view.start + view.lines.length - 1;
 			replaced.delete(view.start);
-			replaced.delete(ANY_START);
 			if (requestedStart !== undefined) replaced.delete(requestedStart);
 			for (const start of replaced) {
 				if (start >= view.start && start <= end) replaced.delete(start);
@@ -101,7 +92,6 @@ export class ReadIndex {
 		}
 	}
 
-	/** Evict earlier reads extending past eofLine when a read reached end-of-file. */
 	truncate(path: string, eofLine: number): void {
 		for (let index = this.#sources.length - 1; index >= 0; index--) {
 			const source = this.#sources[index];
@@ -115,22 +105,22 @@ export class ReadIndex {
 		}
 	}
 
-	/** Mark the last delivery from start (or ANY_START) as a stub or condensed view. */
 	markReplaced(path: string, start: number): void {
+		if (!Number.isSafeInteger(start) || start < 1) return;
 		const replaced = this.#replaced.get(path) ?? new Set<number>();
 		replaced.add(start);
 		this.#replaced.set(path, replaced);
 	}
 
-	/** Return true when re-reading this range must deliver the exact text. */
-	forcesFull(path: string, start: number): boolean {
-		const replaced = this.#replaced.get(path);
-		return (
-			replaced !== undefined && (replaced.has(start) || replaced.has(ANY_START))
-		);
+	markPathReplaced(path: string): void {
+		this.#replacedPaths.add(path);
 	}
 
-	/** Return earlier verbatim reads overlapping view identically, ordered by size then recency. */
+	forcesFull(path: string, start: number): boolean {
+		if (this.#replacedPaths.has(path)) return true;
+		return this.#replaced.get(path)?.has(start) ?? false;
+	}
+
 	overlaps(path: string, view: ReadView): Overlap[] {
 		const found: Overlap[] = [];
 		for (let index = this.#sources.length - 1; index >= 0; index--) {
@@ -138,15 +128,14 @@ export class ReadIndex {
 			const shared = source?.path === path ? overlap(source, view) : undefined;
 			if (shared) found.push(shared);
 		}
-		// Rely on stable sort so equal-length overlaps stay newest first.
 		return found.sort(
 			(a: Overlap, b: Overlap) => b.to - b.from - (a.to - a.from),
 		);
 	}
 
-	/** Forget cached reads for a path after edit or write modifies it. */
 	invalidate(path: string): void {
 		this.#replaced.delete(path);
+		this.#replacedPaths.delete(path);
 		for (let index = this.#sources.length - 1; index >= 0; index--) {
 			const source = this.#sources[index];
 			if (source?.path !== path) continue;
@@ -158,11 +147,11 @@ export class ReadIndex {
 	clear(): void {
 		this.#sources.length = 0;
 		this.#replaced.clear();
+		this.#replacedPaths.clear();
 		this.#chars = 0;
 	}
 }
 
-/** Minimum byte length required before a passage can be deduplicated. */
 export const MIN_PASSAGE_BYTES = 256;
 const MAX_PASSAGES = 50_000;
 const FILE_HEADING = /^\*\*`([^`\n]+)`\*\*/;
@@ -182,7 +171,6 @@ interface InspectedPart {
 	coreInFence: boolean;
 }
 
-/** Track CommonMark fence state across a paragraph and detach outer fences so omission preserves balance. */
 function inspectPartFences(
 	part: string,
 	openBefore: FenceState | undefined,
@@ -301,7 +289,6 @@ export function passages(text: string): string[] {
 	return found;
 }
 
-/** Long passages delivered verbatim by each tool, indexed by content hash. */
 export class PassageIndex {
 	readonly #calls = new Map<string, string[]>();
 
@@ -313,7 +300,6 @@ export class PassageIndex {
 			this.#calls.delete(key);
 			this.#calls.set(key, calls);
 		}
-		// Evict the oldest key first using Map insertion order.
 		while (this.#calls.size > MAX_PASSAGES) {
 			const oldest = this.#calls.keys().next().value;
 			if (oldest === undefined) break;
@@ -321,7 +307,6 @@ export class PassageIndex {
 		}
 	}
 
-	/** Return earlier calls of tool that delivered this exact passage, newest first. */
 	calls(tool: string, passage: string): readonly string[] {
 		return (this.#calls.get(digest(tool, passage)) ?? []).toReversed();
 	}
@@ -331,7 +316,6 @@ export class PassageIndex {
 	}
 }
 
-/** Replace repeated non-final passages still visible in earlier results of the same tool. */
 export function dedupPassages(
 	tool: string,
 	text: string,
@@ -360,7 +344,6 @@ export function dedupPassages(
 		if (!last && balanced && bytes >= MIN_PASSAGE_BYTES) {
 			const candidates = index.calls(tool, core);
 			const visible = context();
-			// Extend the active marker when the same earlier call also contains this passage.
 			if (
 				pending &&
 				!coreInFence &&
@@ -413,7 +396,6 @@ function parseNumberedExcerpt(core: string): ReadView | undefined {
 		: { start, lines, body: lines.join("\n") };
 }
 
-/** Replace numbered fenced file hunks already present verbatim in an earlier visible read. */
 export function dedupReadExcerpts(
 	text: string,
 	cwd: string,

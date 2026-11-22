@@ -8,13 +8,10 @@ import {
 } from "./bridge.ts";
 import { bashFileView, resolvePath } from "./views.ts";
 
-/** Filtering category assigned to a tool result. */
 export type Category = "read" | "terminal" | "listing" | "generic";
 
-/** Bundled RTK profile directories under `rtk/`. */
 export type Pipeline = "terminal" | "listing" | "generic";
 
-/** Minimum UTF-8 byte size before a tool result is considered for filtering. */
 export const MIN_BYTES = 512;
 
 const EXCLUDED = new Set(["edit", "write"]);
@@ -86,13 +83,9 @@ const MIN_BASE64_RUN = 1_024;
 export interface Route {
 	category: Category;
 	text: string;
-	/** Absolute path of a file read or a single-file Bash print command. */
 	path?: string;
-	/** 1-based starting line parsed from a read-widening banner when present. */
 	offset?: number;
-	/** Content block index replaced on multi-block read results. */
 	blockIndex?: number;
-	/** True when every active Bash command segment invoked rtk directly. */
 	wrapped?: boolean;
 }
 
@@ -679,7 +672,6 @@ function scanShell(command: string): {
 	return { sanitized: out, substitutions, unclosedSubstitution };
 }
 
-/** Join line continuations, strip unquoted escapes and comments, and blank quoted literals. */
 export function sanitizeShell(command: string): string {
 	return scanShell(command).sanitized;
 }
@@ -763,7 +755,6 @@ function parseSegmentInvocation(
 		: { name: lastPrefix, dynamic: false };
 }
 
-/** Return the leading safe program name for a shell command, or "?" when dynamic or unknown. */
 export function leadingShellProgram(command: string): string {
 	const { segments } = scanShellSegments(command);
 	let fallback: string | undefined;
@@ -783,7 +774,6 @@ export function leadingShellProgram(command: string): string {
 	return fallback ?? "?";
 }
 
-/** Leave rtk recall output untouched even behind prefixes, flags, subshells, or command substitutions. */
 export function hasRtkRecall(command: string): boolean {
 	const queue = [command];
 	for (let cursor = 0; cursor < queue.length && cursor < 64; cursor++) {
@@ -805,7 +795,6 @@ export function hasRtkRecall(command: string): boolean {
 	return false;
 }
 
-/** Return true when every non-setup shell segment and command substitution runs through an rtk filter subcommand. */
 export function isRtkWrapped(command: string): boolean {
 	const queue = [command];
 	let topActive = 0;
@@ -832,7 +821,6 @@ export function isRtkWrapped(command: string): boolean {
 	return topActive > 0;
 }
 
-/** Return the filtering category for a tool name, or undefined when excluded. */
 export function categoryFor(toolName: string): Category | undefined {
 	if (EXCLUDED.has(toolName)) return undefined;
 	if (toolName === "read") return "read";
@@ -844,7 +832,6 @@ export function hasRawTerminalOutput(text: string): boolean {
 	return text.includes("\u001b") || text.includes("\r");
 }
 
-/** Route a Pi tool_result event for filtering, or return undefined when skipped. */
 export function select(event: ToolResultEvent, cwd: string): Route | undefined {
 	const category = categoryFor(event.toolName);
 	// Ignore nested tool calls because they feed caller scripts rather than the model.
@@ -1066,7 +1053,6 @@ function matchesLastLine(
 	return false;
 }
 
-/** Verify that the final status line and all full-output notices survived filtering. */
 export function preservesTrailer(original: string, filtered: string): boolean {
 	const body = filtered.replace(RECALL_HINT, "");
 	const [origLast] = lastNonEmptyLines(original, 1);
@@ -1093,7 +1079,6 @@ export function structureCheck(pipeline: Pipeline): StructureCheck {
 			preservesBoundaries(original, filtered));
 }
 
-/** Return false when RTK's head/tail line cap would drop FFF file-group boundaries. */
 export function canCapListing(
 	text: string,
 	headLines = 50,

@@ -421,7 +421,6 @@ export function workerRows(
 	return rows;
 }
 
-// Group subagent calls by assistant message so parallel workers stay in one batch.
 export function latestBatch(entries: readonly SessionEntry[]): Row[] {
 	const results = new Map<
 		string,

@@ -245,7 +245,6 @@ describe("select", () => {
 				makeEvent({
 					toolName: "bash",
 					input: { command: 'echo "rtk recall deadbeef01234567"' },
-					content: [{ type: "text", text: big }],
 				}),
 				cwd,
 			),
@@ -331,13 +330,10 @@ describe("preservesTrailer, structureCheck, canCapListing & createGate", () => {
 		);
 		assert.equal(exceedsCap("a".repeat(2_001)), true);
 
-		assert.deepEqual(ruleMethods(join(BUNDLED_RTK_ROOT, "terminal")), [
-			"ansi",
-			"progress",
-			"dedup",
-			"base64-elide",
-			"cap",
-		]);
+		assert.deepEqual(ruleMethods(join(BUNDLED_RTK_ROOT, "terminal")), {
+			kind: "methods",
+			methods: ["ansi", "progress", "dedup", "base64-elide", "cap"],
+		});
 
 		const gate = createGate(BUNDLED_RTK_ROOT);
 		assert.equal(gate("terminal", "normal line 1\nnormal line 2"), false);
@@ -362,6 +358,18 @@ describe("preservesTrailer, structureCheck, canCapListing & createGate", () => {
 			const future = new Date(Date.now() + 60_000);
 			utimesSync(tomlPath, future, future);
 			assert.equal(customGate("listing", `\u001b[35m${multiMid}`), false);
+
+			writeFileSync(tomlPath, "[[hook.after_tool.any]]\nenabled = false\n");
+			assert.deepEqual(ruleMethods(listingDir), { kind: "disabled" });
+			const futureDisabled = new Date(Date.now() + 120_000);
+			utimesSync(tomlPath, futureDisabled, futureDisabled);
+			assert.equal(customGate("listing", `\u001b[35m${multiMid}`), false);
+
+			writeFileSync(
+				tomlPath,
+				'[[hook.after_tool.any]]\nuse = ["unknown-custom"]\n',
+			);
+			assert.deepEqual(ruleMethods(listingDir), { kind: "unsupported" });
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

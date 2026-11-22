@@ -1,7 +1,6 @@
 import { FAILURES, type Failure } from "./bridge.ts";
 import type { Category } from "./policy.ts";
 
-/** Custom session entry type for persisted outcome tallies. */
 export const ENTRY_TYPE = "rtk-pi-extended";
 const ENTRY_VERSION = 1;
 const CATEGORIES: readonly Category[] = [
@@ -11,23 +10,18 @@ const CATEGORIES: readonly Category[] = [
 	"generic",
 ];
 const OUTCOMES = ["filtered", "unchanged", "failed"] as const;
-// Match one or more mechanism names joined by `+`, such as `rtk:listing+grep-group`.
 const MECHANISM = /^[a-z][a-z-]*(?::[a-z-]+)?(?:\+[a-z][a-z-]*(?::[a-z-]+)?)*$/;
 
 export type Outcome = (typeof OUTCOMES)[number];
 
-/** Aggregated byte and result counts for one tool, category, mechanism, and outcome. */
 export interface Tally {
 	tool: string;
 	category: Category;
-	/** Mechanism chain that produced or attempted the replacement. */
 	mechanism: string;
 	outcome: Outcome;
 	reason?: Failure;
 	count: number;
-	/** UTF-8 bytes of the original result text. */
 	bytesBefore: number;
-	/** UTF-8 bytes of the retained result text. */
 	bytesAfter: number;
 }
 
@@ -48,7 +42,6 @@ function key(tally: Sample): string {
 	]);
 }
 
-/** Merge a tally into the map by adding counts and byte totals for matching keys. */
 export function mergeTallies(target: Map<string, Tally>, tally: Tally): void {
 	const id = key(tally);
 	const current = target.get(id);
@@ -61,7 +54,6 @@ export function mergeTallies(target: Map<string, Tally>, tally: Tally): void {
 	current.bytesAfter += tally.bytesAfter;
 }
 
-/** Accumulates outcomes between turn boundaries. */
 export class Ledger {
 	readonly #tallies = new Map<string, Tally>();
 
@@ -73,7 +65,6 @@ export class Ledger {
 		this.#tallies.clear();
 	}
 
-	/** Return pending tallies as entry data and clear them. */
 	drain(): EntryData | undefined {
 		if (this.#tallies.size === 0) return undefined;
 		const tallies = [...this.#tallies.values()];
@@ -119,7 +110,6 @@ function parseIdentity(value: Record<string, unknown>): Identity | undefined {
 	if (typeof mechanism !== "string" || !MECHANISM.test(mechanism))
 		return undefined;
 	if (category === undefined || outcome === undefined) return undefined;
-	// Require known failure reasons exclusively on failed outcomes.
 	if (reason !== undefined && failure === undefined) return undefined;
 	if ((outcome === "failed") !== (failure !== undefined)) return undefined;
 	const identity = { tool, category, mechanism, outcome };
@@ -127,7 +117,6 @@ function parseIdentity(value: Record<string, unknown>): Identity | undefined {
 }
 
 function validSizes(outcome: Outcome, before: number, after: number): boolean {
-	// Accepted replacements must shrink the output while other outcomes preserve size.
 	return outcome === "filtered" ? after < before : after === before;
 }
 
@@ -149,7 +138,6 @@ function parseTally(value: unknown): Tally | undefined {
 	return { ...identity, count, bytesBefore, bytesAfter };
 }
 
-/** Parse and validate persisted outcome entry data. */
 export function parseEntry(data: unknown): EntryData | undefined {
 	if (!isRecord(data) || data.version !== ENTRY_VERSION) return undefined;
 	if (

@@ -347,8 +347,10 @@ async function syncDirectory(path: string): Promise<void> {
 	}
 }
 async function ensureDirectory(path: string): Promise<void> {
+	let created = false;
 	try {
 		await mkdir(path, { mode: 0o700 });
+		created = true;
 	} catch (error: unknown) {
 		if (!errno(error, "EEXIST")) throw error;
 	}
@@ -357,8 +359,7 @@ async function ensureDirectory(path: string): Promise<void> {
 			"UNSAFE_PATH",
 			"Progress storage directory disappeared during initialization.",
 		);
-	// Sync the parent directory so new directory entries are durable.
-	await syncDirectory(dirname(path));
+	if (created) await syncDirectory(dirname(path));
 }
 async function available(
 	location: Location,
@@ -607,8 +608,10 @@ function validateMerged(candidate: unknown, project: string): ProgressDocument {
 	}
 }
 
-// Merge task patches without deleting or reordering records, then revalidate the document.
-function mergeUpdates(document: ProgressDocument, updates: unknown): ProgressDocument {
+function mergeUpdates(
+	document: ProgressDocument,
+	updates: unknown,
+): ProgressDocument {
 	const code: ProgressErrorCode = "INVALID_PROPOSAL";
 	if (!Array.isArray(updates)) fail(code, "Expected a task updates array.");
 	const tasks = structuredClone(document.tasks);
@@ -616,7 +619,8 @@ function mergeUpdates(document: ProgressDocument, updates: unknown): ProgressDoc
 	for (const patch of updates) {
 		object(patch, code);
 		fields(patch, ["id", "title", "description", "steps"], [], code);
-		const id = patch.id === null ? `task-${randomUUID()}` : text(patch.id, code);
+		const id =
+			patch.id === null ? `task-${randomUUID()}` : text(patch.id, code);
 		const index = tasks.findIndex((task: Task) => task.id === id);
 		if (patch.id !== null && index === -1) fail(code, "Task ID not found.");
 		if (seen.has(id)) fail(code, "Duplicate task update.");
@@ -628,7 +632,8 @@ function mergeUpdates(document: ProgressDocument, updates: unknown): ProgressDoc
 		for (const step of patch.steps) {
 			object(step, code);
 			fields(step, ["id", "description", "status", "blocked_by"], [], code);
-			const stepId = step.id === null ? `step-${randomUUID()}` : text(step.id, code);
+			const stepId =
+				step.id === null ? `step-${randomUUID()}` : text(step.id, code);
 			const stepIndex = existingTask
 				? existingTask.steps.findIndex((item: Step) => item.id === stepId)
 				: -1;
@@ -651,7 +656,6 @@ function mergeUpdates(document: ProgressDocument, updates: unknown): ProgressDoc
 	return validateMerged({ ...document, tasks }, document.project);
 }
 
-/** Commit a background proposal atomically without extending the public CLI protocol. */
 export async function applyProgressUpdates(
 	cwd: string,
 	expectedRevision: number,

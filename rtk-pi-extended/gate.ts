@@ -31,7 +31,6 @@ export function exceedsCap(text: string): boolean {
 
 type Trigger = (text: string) => boolean;
 
-/** Conservative predicates returning true whenever a method might change text. */
 const TRIGGERS: Record<string, Trigger> = {
 	ansi: (text: string): boolean => text.includes("\u001b"),
 	progress: (text: string): boolean => text.includes("\r"),
@@ -45,53 +44,57 @@ const CHAINS: Record<string, string[]> = {
 
 export type Gate = (profile: Pipeline, text: string) => boolean;
 
-/** Parse active method names from a bundled pipeline rule, or undefined when unsupported. */
-export function ruleMethods(directory: string): string[] | undefined {
-	if (existsSync(join(directory, "pipelines"))) return undefined;
+export type ParsedRule =
+	| { kind: "disabled" }
+	| { kind: "methods"; methods: string[] }
+	| { kind: "unsupported" };
+
+export function ruleMethods(directory: string): ParsedRule {
+	if (existsSync(join(directory, "pipelines"))) return { kind: "unsupported" };
 	const text = readFileSync(join(directory, "pipeline.toml"), "utf8").replace(
 		/^\s*#.*$/gm,
 		"",
 	);
-	if (text.match(/^\s*\[\[/gm)?.length !== 1) return undefined;
-	if (!/^\s*\[\[hook\.after_tool\.any\]\]/m.test(text)) return undefined;
-	if (/^\s*enabled\s*=\s*false\s*$/m.test(text)) return [];
+	if (text.match(/^\s*\[\[/gm)?.length !== 1) return { kind: "unsupported" };
+	if (!/^\s*\[\[hook\.after_tool\.any\]\]/m.test(text))
+		return { kind: "unsupported" };
+	if (/^\s*enabled\s*=\s*false\s*$/m.test(text)) return { kind: "disabled" };
 	const use = /^\s*use\s*=\s*\[([^\]]*)\]/m.exec(text)?.[1];
-	if (use === undefined) return undefined;
+	if (use === undefined) return { kind: "unsupported" };
 	const names = [...use.matchAll(/"([^"]+)"/g)].map(
 		(match: RegExpExecArray) => match[1] ?? "",
 	);
 	const methods = names.flatMap((name: string) => CHAINS[name] ?? [name]);
 	return methods.every((name: string) => name in TRIGGERS)
-		? methods
-		: undefined;
+		? { kind: "methods", methods }
+		: { kind: "unsupported" };
 }
 
-/** Check whether a profile's cached pipeline rule could modify text without spawning RTK. */
 export function createGate(root: string): Gate {
-	const cache = new Map<Pipeline, { mtime: number; methods?: string[] }>();
+	const cache = new Map<Pipeline, { mtime: number; rule: ParsedRule }>();
 	return (profile: Pipeline, text: string): boolean => {
 		const directory = join(root, profile);
-		let methods: string[] | undefined;
+		let rule: ParsedRule;
 		try {
 			const mtime = statSync(join(directory, "pipeline.toml")).mtimeMs;
 			const cached = cache.get(profile);
-			if (cached?.mtime === mtime) methods = cached.methods;
+			if (cached?.mtime === mtime) rule = cached.rule;
 			else {
-				methods = ruleMethods(directory);
-				cache.set(profile, { mtime, ...(methods ? { methods } : {}) });
+				rule = ruleMethods(directory);
+				cache.set(profile, { mtime, rule });
 			}
 		} catch {
-			// Fall back to running RTK when the pipeline file cannot be inspected.
 			return true;
 		}
+		if (rule.kind === "disabled") return false;
 		if (
 			profile === "listing" &&
-			(methods === undefined || methods.includes("cap")) &&
+			(rule.kind === "unsupported" || rule.methods.includes("cap")) &&
 			!canCapListing(text, CAP_HEAD_LINES, CAP_TAIL_LINES, CAP_LINES)
 		) {
 			return false;
 		}
-		if (methods === undefined) return true;
-		return methods.some((name: string) => TRIGGERS[name]?.(text) ?? true);
+		if (rule.kind === "unsupported") return true;
+		return rule.methods.some((name: string) => TRIGGERS[name]?.(text) ?? true);
 	};
 }

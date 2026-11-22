@@ -1,12 +1,10 @@
 import { stripJsonIndentation } from "./views.ts";
 
-// Lossless rewrites that verify exact round-trip reconstruction before returning.
 const MATCH = /^(.+?):(\d+):/;
 const COMPACT = /^ (\d+)([:-])(.*)$/;
 
 interface GrepLine {
 	path: string;
-	/** Match or context suffix such as `:12: text`, `:12:text`, or `-13-text`. */
 	rest: string;
 }
 
@@ -14,13 +12,11 @@ function isGrepPath(path: string): boolean {
 	return (
 		path !== "" &&
 		path !== "--" &&
-		// Reject bare timestamps, bracketed clock prefixes, and URL schemes.
 		!/^\s|^\[?\d+$|^\d{4}-\d{2}-\d{2}[T ]\d{2}$/.test(path) &&
 		!path.includes("://")
 	);
 }
 
-/** Attach a grep context line to its surrounding match block path. */
 function contextLine(
 	line: string,
 	path: string | undefined,
@@ -43,7 +39,6 @@ function parseGrep(
 				: undefined;
 		},
 	);
-	// Propagate file paths across trailing and leading context lines outside fenced blocks.
 	let previous: string | undefined;
 	for (let index = 0; index < lines.length; index++) {
 		if (!eligible[index]) {
@@ -69,7 +64,6 @@ function parseGrep(
 	return parsed;
 }
 
-/** Restore full file prefixes to grouped grep lines. */
 export function ungroupGrep(text: string): string {
 	const lines = text.split("\n");
 	const out: string[] = [];
@@ -98,10 +92,8 @@ export function ungroupGrep(text: string): string {
 	return out.join("\n");
 }
 
-/** Group consecutive grep lines by file path outside fenced code blocks while preserving line order. */
 export function groupGrep(text: string): string | undefined {
 	const lines = text.split("\n");
-	// Skip output that already uses grouped line prefixes.
 	if (lines.some((line: string) => COMPACT.test(line))) return undefined;
 	const { eligible, unclosed } = unfencedMask(lines);
 	if (unclosed) return undefined;
@@ -118,7 +110,6 @@ export function groupGrep(text: string): string | undefined {
 		}
 		if (entry.path !== current) out.push(entry.path);
 		current = entry.path;
-		// Convert `:12:text` to ` 12:text` and `-13-text` to ` 13-text`.
 		out.push(` ${entry.rest.slice(1)}`);
 	}
 	const grouped = out.join("\n");
@@ -139,7 +130,6 @@ export interface FenceState {
 
 const FENCE_CANDIDATE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
-/** Advance CommonMark fenced-code state across a single line. */
 export function stepFenceLine(
 	line: string,
 	open: FenceState | undefined,
@@ -218,7 +208,6 @@ function bestSuffix(
 	return best;
 }
 
-/** Expand factored Markdown suffix footnotes back into each line. */
 export function unfactorSuffixes(text: string): string {
 	const lines = text.split("\n");
 	const notes = new Map<string, string>();
@@ -229,7 +218,6 @@ export function unfactorSuffixes(text: string): string {
 		notes.set(note[1], note[2]);
 		end--;
 	}
-	// Strip the blank line separating the footnote definitions.
 	if (notes.size > 0 && lines[end - 1] === "") end--;
 	return lines
 		.slice(0, end)
@@ -244,7 +232,6 @@ export function unfactorSuffixes(text: string): string {
 		.join("\n");
 }
 
-/** Replace repeated long line suffixes outside fenced code blocks with trailing Markdown footnotes. */
 export function factorSuffixes(text: string): string | undefined {
 	if (text.includes("[^")) return undefined;
 	let lines = text.split("\n");
@@ -266,7 +253,6 @@ export function factorSuffixes(text: string): string | undefined {
 	return unfactorSuffixes(factored) === text ? factored : undefined;
 }
 
-/** Strip leading indentation from a complete, pretty-printed JSON document. */
 export function compactJsonDocument(text: string): string | undefined {
 	const trimmed = text.trim();
 	if (!/^[[{]/.test(trimmed) || !text.includes("\n")) return undefined;

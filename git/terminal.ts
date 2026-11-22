@@ -7,7 +7,6 @@ export function terminalCaptureArgs(
 	command: string,
 	platform: NodeJS.Platform = process.platform,
 ): string[] {
-	// Run Git under script with live terminal output and bounded tail capture.
 	const invocation =
 		platform === "darwin"
 			? `/usr/bin/script -q /dev/null /bin/bash -c 'trap : INT; "$1" -c "$2"; exit $?' pi-git "$1" "$2"`
